@@ -85,7 +85,7 @@
       this.autoAim = true; this.firing = false; this.autoFire = true;
       this.grid = new Uint8Array(GS * GS).fill(NEUTRAL); this.claimRadius = 14; this.expandClock = 0;
       this.share = [0, 0, 0, 0]; this.level = [0, 0, 0, 0];
-      this.ammo = [25.06e6, 25.02e6, 24.84e6, 25.12e6];
+      this.ammo = [249968, 249968, 249968, 249968]; this.hp = [8e6, 8e6, 8e6, 8e6]; this.dead = [false, false, false, false]; this.floaters = []; this.mg = [0, 0, 0, 0];
       this.score = [198000, 296000, 220000, 299000]; this.shield = [1, 1, 1, 1];
       this.items = [0, 0, 0, 0, 0]; this.aiItems = Array.from({ length: 4 }, () => [0, 0, 0, 0, 0]);
       this.hit = [0, 0, 0, 0, 0, 0, 0, 0]; this.slotFlash = []; this.itemFlash = [];
@@ -104,7 +104,7 @@
       this.pegs = this.makePegs(); this.lowerPegs = this.makeLowerPegs();
       this.fpsEMA = 60; this._lastNow = 0;
 
-      for (let i = 0; i < 16; i++) { this.marble(i % 4); const m = this.marbles[this.marbles.length - 1]; m.x = 130 + i * 27 + rand(-4, 4); m.y = 24 + rand(-3, 3); m.wait = .8 + i * .15; m.v = 32; m.r = 6.5; m.path = [[m.x, m.y]]; }
+      for (let i = 0; i < 16; i++) { this.marble(i % 4); const m = this.marbles[this.marbles.length - 1]; m.x = 130 + i * 27 + rand(-4, 4); m.y = 24 + rand(-3, 3); m.wait = .8 + i * .15; m.v = 2 ** ((Math.random() * 4) | 0); m.r = 6.5; m.path = [[m.x, m.y]]; }
       // seed silk immediately so t~10s looks dense
 
     }
@@ -211,7 +211,7 @@
       if (kind === 2) n = 1; if (kind === 3) n = count ?? 7;
       const speed = kind === 5 ? 5.2 : kind === 2 ? 2.2 : kind === 3 ? 9 : kind === 4 ? 4.6 : kind === 1 ? 5 : 4.2;
       const spread = kind === 2 ? 0 : kind === 3 ? .02 : kind === 5 ? .349 / Math.max(1, (count ?? 48) - 1) : .011; // normal jet: tight (~10° total)
-      const cost = kind === 2 ? 220e3 : kind === 3 ? 28e3 : Math.max(200, n * 260);
+      const cost = kind === 2 ? 0 : kind === 3 ? 0 : n * 22;
       this.ammo[team] = Math.max(0, this.ammo[team] - cost);
       for (let k = 0; k < n && this.shots.length < MAX_SHOTS; k++) {
         const a = baseAng + (k - (n - 1) / 2) * spread + (kind === 5 ? rand(-.03, .03) : rand(-.008, .008));
@@ -226,14 +226,17 @@
     }
     use(team, i) {
       const bag = team === this.player ? this.items : this.aiItems[team];
-      if (bag[i] <= 0 || (i === 3 && this.t < 45)) return false; bag[i]--;
+      if (bag[i] <= 0 || this.dead[team] || (i === 3 && this.t < 45)) return false; bag[i]--;
       const a = this.aim[team];
       if (i === 0) { this.spawn(team, 5, 48, a); this.events.push({ t: this.t, team, kind: 'shotgun' }); } // 散弹: 48-pellet burst in a ~41° cone
-      if (i === 1) { for (let k = 0; k < 14; k++) this.spawn(team, 0, 3, a + rand(-.28, .28)); }
-      if (i === 2) { this.shield[team] = 1; this.sparks.push({ x: BASES[team][0], y: BASES[team][1], team, life: 1, burst: true }); }
+      if (i === 1) { this.mg[team] = 2.5; } // 机枪: rapid straight stream for 2.5s
+      if (i === 2) { const add = Math.round(2e4 * Math.pow(2, Math.min(4, Math.floor(this.t / 90)))); this.hp[team] = Math.min(16e6, this.hp[team] + add); this.floaters.push({ x: BASES[team][0], y: BASES[team][1] - 30, text: '+' + fmt(add), team, life: 1.6 }); this.sparks.push({ x: BASES[team][0], y: BASES[team][1], team, life: 1, burst: true }); }
       if (i === 3 && this.shots.filter(q => q.kind === 2).length >= (this.t > 420 ? 2 : 1)) { bag[i]++; return false; }
-      if (i === 3) { this.ammo[team] += 2e5; this.spawn(team, 2, 1, a); const s2 = this.shots[this.shots.length - 1]; if (s2 && s2.kind === 2) s2.value = rand(3e5, 1.2e6) * (1 + this.t / 500); this.events.push({ t: this.t, team, kind: 'bigball' }); }
-      if (i === 4) { this.spawn(team, 3, 6, a); this.lasers.push({ team, a: a + rand(-.15, .15), life: 1.4 }); }
+      if (i === 3) { this.ammo[team] += 2e5; this.spawn(team, 2, 1, a); const s2 = this.shots[this.shots.length - 1]; if (s2 && s2.kind === 2) s2.value = 2 ** Math.min(23, 17 + Math.floor(rand(0, 2.5) + this.t / 90)); this.events.push({ t: this.t, team, kind: 'bigball' }); }
+      if (i === 4) { // 狙击: instant beam across the map, painting a solid line
+        const [bx, by] = BASES[team]; this.lasers.push({ team, a, life: 1.2 });
+        for (let d = 60 / WS; d < G * 1.5; d += S) { const x = bx + Math.cos(a) * d, y = by + Math.sin(a) * d; if (x < 0 || y < 0 || x > G || y > G) break; this.paintSolid(x, y, team, S * 2.2); }
+      }
       return true;
     }
     paintSolid(x, y, team, r) {
@@ -261,10 +264,10 @@
       if (gx < 0 || gy < 0 || gx >= GS || gy >= GS) return true;
       const owner = this.grid[this.id(gx, gy)];
       if (owner === p.team) return false;
-      if (owner < 4 && p.kind !== 5 && this.shield[owner] > .02) {
+      if (owner < 4 && p.kind !== 5 && !this.dead[owner]) {
         const [bx, by] = BASES[owner];
         if (Math.hypot(p.x - bx, p.y - by) < 100 / WS) {
-          this.shield[owner] = Math.max(0, this.shield[owner] - (p.kind === 2 ? .07 : .0025));
+          this.hitBase(owner, 1500);
           this.sparks.push({ x: p.x, y: p.y, team: owner, life: .7 });
           return true;
         }
@@ -272,7 +275,7 @@
       // UnityDots rule: a bullet entering a foreign/neutral cell dies and converts exactly that one cell
       { const i = gy * GS + gx; this.grid[i] = p.team; this.heat[i] = 1; this.score[p.team] += 35; this.dirty = true; this.stat.die++; this.stat.paint++; }
       if (Math.random() < .35) this.sparks.push({ x: p.x, y: p.y, team: p.team, life: .55 + Math.random() * .3 });
-      if (p.kind === 2) { p.value *= .995; p.life++; p.v0 = p.v0 || p.value; return p.life > 260 || p.value < p.v0 * .3; }
+      if (p.kind === 2) { p.value *= .995; p.life++; p.v0 = p.v0 || p.value; return p.life > 260 || p.value < 2e4; }
       return true;
     }
     pushSilk(team, x, y, vx, vy, life) {
@@ -293,6 +296,17 @@
       const [bx, by] = BASES[t], a = this.aim[t] + rand(-.45, .45), sp = rand(6, 18);
       const dist = rand(20, 380);
       this.pushSilk(t, bx + Math.cos(a) * dist, by + Math.sin(a) * dist, Math.cos(a) * sp, Math.sin(a) * sp, .4 + Math.random() * .9);
+    }
+    hitBase(b, dmg) {
+      if (this.dead[b]) return;
+      this.hp[b] = Math.max(0, this.hp[b] - dmg);
+      if (this.hp[b] <= 0) {
+        this.dead[b] = true; this.ammo[b] = 0; this.lock[b] = null;
+        const [bx, by] = BASES[b];
+        for (let k = 0; k < 160; k++) { const a = rand(0, 6.283), v = rand(60, 520); this.sparks.push({ x: bx, y: by, team: b, life: 2, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
+        this.floaters.push({ x: bx, y: by - 40, text: '淘汰', team: b, life: 2.5 });
+        this.events.push({ t: this.t, team: b, kind: 'eliminated' });
+      }
     }
     giveItem(team, type) {
       if (team === this.player) this.items[type] = Math.min(99, this.items[type] + 1);
@@ -328,12 +342,12 @@
           // a marble passes only if its impact speed beats a value-dependent threshold (heavier = sinks easier),
           // otherwise it bounces (e=.6) off a slightly crowned surface and rolls out toward the X2 cups.
           if (!m.zone && !m.passing && m.x > GAP[0] && m.x < GAP[1] && m.y + m.r > BUOY_Y0 && m.y < BUOY_Y0 + 24) {
-            const thr = PASS_V / (1 + Math.log2(m.v) / 10);
-            if (m.vy > thr) { m.passing = 1; (this.gateLog ||= []).push({ vIn: m.vy, thr, passed: 1, v: m.v }); }
+            // ref2: value rule — marbles ≥262K (2^18) fall through, smaller ones are bounced back up
+            if (m.v >= 262144) { m.passing = 1; this.gatePass = (this.gatePass || 0) + 1; }
             else if (m.vy > 0) {
-              if (m.vy > 40) (this.gateLog ||= []).push({ vIn: m.vy, thr, passed: 0, v: m.v });
+              // bounce
               const cx = (GAP[0] + GAP[1]) / 2, sx = clamp((m.x - cx) / ((GAP[1] - GAP[0]) / 2), -1, 1) * .3 + (m.x >= cx ? .06 : -.06), nl = Math.hypot(sx, 1);
-              this.contact(m, sx / nl, -1 / nl, Math.max(0, m.y + m.r - BUOY_Y0) / nl, E, MU, true);
+              this.contact(m, sx / nl, -1 / nl, Math.max(0, m.y + m.r - BUOY_Y0) / nl, E, MU, true); m.vy = Math.min(m.vy, -220 - Math.random() * 120); // boosted back up
             }
           }
           const spd = Math.hypot(m.vx, m.vy); if (spd > 520) { m.vx *= 520 / spd; m.vy *= 520 / spd; }
@@ -438,8 +452,8 @@
             let best = null, bd = 1e9;
             if ((this.frame + t) % 3 === 0) {
               for (const q of this.shots) {
-                if (q.team === t) continue;
-                const d = Math.hypot(q.x - bx, q.y - by), lim = q.kind === 2 ? G * .5 : 200 / WS;
+                if (q.team === t || q.kind !== 2) continue;
+                const d = Math.hypot(q.x - bx, q.y - by), lim = G * .5;
                 if (d < lim && d < bd) { bd = d; best = q; }
               }
               this.lock[t] = best;
@@ -448,7 +462,7 @@
             if (L && L.x > -20) {
               const want = Math.atan2(L.y - by, L.x - bx);
               let da = ((want - this.aim[t] + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-              this.aim[t] += clamp(da, -3.2 * dt, 3.2 * dt);
+              this.aim[t] += clamp(da, -9 * dt, 9 * dt);
             } else {
               // free continuous rotation (spin), speed/direction per team
               this.aim[t] += this.spin[t] * dt;
@@ -457,7 +471,8 @@
           }
         }
         if (t === this.player && this.autoAim) this.playerAim = this.aim[t];
-        this.cool[t] -= dt; if (!this.opened) continue;
+        this.cool[t] -= dt; if (!this.opened || this.dead[t]) continue;
+        if (this.mg[t] > 0) { this.mg[t] -= dt; this.spawn(t, 1, 4, this.aim[t]); }
         // rubber band before 7:00: teams above 30% fire slower, teams below 18% faster
         const band = this.t < 420 ? (this.share[t] > .29 ? .3 : this.share[t] > .24 ? .65 : this.share[t] < .18 ? 1.4 : 1) : 1;
         const rate = clamp(.11 - this.t * .0001, .04, .11) / (this.power[t] * band);
@@ -475,15 +490,19 @@
       }
       if (false) { this.growClock = (this.growClock || 0) + dt; if (this.growClock > .4) { this.growClock = 0; this.growBases(5 + Math.min(1, this.t / 10) * 10); } }
       if (!this.opened) {
-        if (!this.opening && this.t > 1.5) {
-          this.opening = BASES.map(([bx, by], t) => { const a = Math.atan2(G / 2 - by, G / 2 - bx); return { t, x: bx + Math.cos(a) * 30, y: by + Math.sin(a) * 30, vx: Math.cos(a) * 330, vy: Math.sin(a) * 330, trail: [] }; });
+        if (!this.opening && this.t > .5) {
+          this.opening = BASES.map(([bx, by], t) => { const a = Math.atan2(G / 2 - by, G / 2 - bx); return { t, x: bx + Math.cos(a) * 30, y: by + Math.sin(a) * 30, vx: Math.cos(a) * 360, vy: Math.sin(a) * 360, trail: [] }; });
           this.lasers.push(...[0, 1, 2, 3].map(t => ({ team: t, a: this.aim[t], life: .5 })));
         }
         if (this.opening) {
-          for (const o of this.opening) { o.trail.push([o.x, o.y]); if (o.trail.length > 30) o.trail.shift(); o.x += o.vx * dt; o.y += o.vy * dt; }
+          for (const o of this.opening) { o.trail.push([o.x, o.y]); if (o.trail.length > 30) o.trail.shift(); o.x += o.vx * dt; o.y += o.vy * dt; this.paintSolid(o.x, o.y, o.t, S * 2.6); }
           if (Math.hypot(this.opening[0].x - G / 2, this.opening[0].y - G / 2) < 14) {
             // four sniper rounds collide: burst
             for (let t = 0; t < 4; t++) for (let k = 0; k < 40; k++) { const a = rand(0, 6.283), v = rand(60, 420); this.sparks.push({ x: G / 2, y: G / 2, team: t, life: 1.6, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
+            for (let t = 0; t < 4; t++) for (let k = 0; k < 9; k++) { // radial spray of paint lines
+              const a = Math.atan2(BASES[t][1] - G / 2, BASES[t][0] - G / 2) + rand(-1.1, 1.1), L = rand(50, 170);
+              for (let d = 12; d < L; d += S) this.paintSolid(G / 2 + Math.cos(a) * d, G / 2 + Math.sin(a) * d, t, S * (1.6 - d / L));
+            }
             this.burst = { t: this.t, life: 2 }; this.opened = true; this.opening = null;
           }
         }
@@ -537,27 +556,28 @@
           const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS;
           if (!p.brush) { p.brush = 1; p.age = 0; const sp = 1.8; const a = Math.atan2(p.vy, p.vx); p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; }
           p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt; p.age += dt;
+          { const ow = this.grid[((p.y / S) | 0) * GS + ((p.x / S) | 0)]; if (ow !== NEUTRAL && ow !== p.team) p.value *= Math.exp(-.95 * dt); } // ref2: 6.3M→1.5M in ~1.5s over enemy paint
           if (p.x < rr * .6) { p.x = rr * .6; p.vx = Math.abs(p.vx); } if (p.x > G - rr * .6) { p.x = G - rr * .6; p.vx = -Math.abs(p.vx); }
           if (p.y < rr * .6) { p.y = rr * .6; p.vy = Math.abs(p.vy); } if (p.y > G - rr * .6) { p.y = G - rr * .6; p.vy = -Math.abs(p.vy); }
           // heavy body: bounce off enemy base shields and exchange damage (inferred: ball keeps ≥10%, shield absorbs 5/7 of the ball)
           p.hitCd = Math.max(0, (p.hitCd || 0) - dt);
           for (let b = 0; b < 4; b++) {
-            if (b === p.team) continue;
+            if (b === p.team || this.dead[b]) continue;
             const [bx, by] = BASES[b], dx = p.x - bx, dy = p.y - by, d = Math.hypot(dx, dy) || 1, R0 = 92 / WS + rr * .8;
             if (d < R0) {
               const nx = dx / d, ny = dy / d, vn = p.vx * nx + p.vy * ny;
               p.x = bx + nx * R0; p.y = by + ny * R0;
               if (vn < 0) { p.vx -= 2 * vn * nx; p.vy -= 2 * vn * ny; }
               if (!p.hitCd) {
-                const ball = p.value, sh = this.ammo[b];
-                this.ammo[b] = Math.max(0, sh - ball * 5 / 7);
-                p.value = Math.max(ball * .1, ball - sh * 1.4);
-                p.hitCd = .6; this.shield[b] = Math.max(0, this.shield[b] - .3);
+                const ball = p.value, sh = this.hp[b], d = Math.min(ball, sh) * .81;   // ref: 3.0M vs 7.9M → 585K / 5.4M
+                p.value = ball - d; this.hitBase(b, d);
+                p.hitCd = .6;
                 for (let k = 0; k < 30; k++) { const a = rand(0, 6.283), v = rand(40, 260); this.sparks.push({ x: bx + nx * 92 / WS, y: by + ny * 92 / WS, team: b, life: 1, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
                 this.events.push({ t: this.t, team: p.team, kind: 'ballHit', target: b, ball, sh, after: [p.value, this.ammo[b]] });
               }
             }
           }
+          for (let b = 0; b < 4; b++) if (b !== p.team && this.lock[b] === p && !this.dead[b]) p.value -= 5.5e5 * dt; // turret streams grind the ball
           if (p.value < 5e4) continue;
           this.paintSolid(p.x, p.y, p.team, rr * .95);
           p.value *= Math.pow(.97, dt);
@@ -662,9 +682,10 @@
       for (let t = 0; t < 4; t++) {
         this.score[t] = Math.max(0, this.score[t] + dt * (12000 + this.share[t] * 60000));
         this.level[t] = Math.min(99, Math.floor(this.t / 30));
-        this.ammo[t] += dt * (3000 + this.t * 60) * this.power[t] * (this.ammo[t] < 3e6 ? 12 : 1);
+        if (!this.dead[t]) this.ammo[t] += dt * (400 + this.share[t] * 8000) * this.power[t]; this.ammo[t] = Math.min(this.ammo[t], 3e6);
       }
-      if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
+      if (this.dead.filter(d => !d).length === 1) { this.winner = this.dead.indexOf(false); this.over = true; }
+      else if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
       else if (this.share.some(v => v > .97 && this.t > 540)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
     }
   }
@@ -765,6 +786,7 @@
       c.fillStyle = g; c.beginPath(); c.arc(m.x, m.y, r, 0, 7); c.fill();
       c.strokeStyle = 'rgba(255,255,255,.55)'; c.lineWidth = 1; c.stroke();
       c.fillStyle = 'rgba(255,255,255,.55)'; c.beginPath(); c.ellipse(m.x - r * .3, m.y - r * .55, r * .4, r * .18, -.4, 0, 7); c.fill();
+      if (m.v >= 262144 && m.trail.length) { c.fillStyle = 'rgba(255,255,230,.9)'; for (const q of m.trail) for (let k = 0; k < 2; k++) { c.beginPath(); c.arc(q[0] + rand(-r, r) * .6, q[1] + rand(-r, r) * .6, rand(.6, 1.8), 0, 7); c.fill(); } }
       const txt = fmt(m.v);
       c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
       c.font = `900 ${Math.max(11, Math.round(r * (txt.length > 4 ? 1.0 : 1.15)))}px Arial,sans-serif`;
@@ -1205,11 +1227,12 @@
         g.circle(x, y, r + pulse * .4).stroke({ width: 4, color: team.hex, alpha: 1 }); g.circle(x, y, r + pulse * .4).stroke({ width: 1.2, color: 0xffffff, alpha: .7 });
         g.circle(x, y, r - 5).stroke({ width: 3.5, color: team.hex, alpha: 0.55 });
         g.circle(x, y, r - 6).fill({ color: 0x020812, alpha: 0.4 }); g.circle(x, y, r - 6).fill({ color: team.hex, alpha: 0.16 });
+        if (game.dead[t]) { g.circle(x, y, r).fill({ color: 0xc8d2dc, alpha: .25 }).stroke({ width: 2, color: 0xffffff, alpha: .35 }); }
         // aim
         const a = game.aim[t];
         // rotating turret: hub + barrel that sticks out past the ring; streams follow this angle
         const ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca, L0 = 4, L1 = r + 14, bw = 4;
-        g.poly([x + ca * L0 + px * bw, y + sa * L0 + py * bw, x + ca * L1 + px * (bw * .7), y + sa * L1 + py * (bw * .7), x + ca * L1 - px * (bw * .7), y + sa * L1 - py * (bw * .7), x + ca * L0 - px * bw, y + sa * L0 - py * bw])
+        if (!game.dead[t]) g.poly([x + ca * L0 + px * bw, y + sa * L0 + py * bw, x + ca * L1 + px * (bw * .7), y + sa * L1 + py * (bw * .7), x + ca * L1 - px * (bw * .7), y + sa * L1 - py * (bw * .7), x + ca * L0 - px * bw, y + sa * L0 - py * bw])
           .fill({ color: team.hex, alpha: .95 }).stroke({ width: 1.5, color: 0xffffff, alpha: .8 });
         g.moveTo(x + ca * L0, y + sa * L0).lineTo(x + ca * L1, y + sa * L1).stroke({ width: 1.6, color: 0xffffff, alpha: .9 });
         g.circle(x + ca * L1, y + sa * L1, 5).fill({ color: 0xffffff, alpha: .9 });
@@ -1219,7 +1242,7 @@
         const texts = this.baseTexts[t]; const ta = clamp((r * WS - 55) / 30, 0, 1), U = 1 / WS; texts.ammo.alpha = texts.sec.alpha = ta; texts.lab.alpha = texts.zero.alpha = 1 - ta; texts.lab.x = x; texts.lab.y = y - r - 4; texts.zero.x = x + r + 6; texts.zero.y = y;
         if (ta < 1) { g.circle(x, y, r).fill({ color: team.hex, alpha: .12 * (1 - ta) }); }
         // ref layout: [shield] 25.86M  /  hub  /  [gun box] 241,410
-        texts.ammo.style.fontSize = 13; texts.ammo.text = fmt(game.ammo[t]); texts.ammo.x = x - 22 * U; texts.ammo.y = y - 26 * U; texts.ammo.style.fill = 0xffffff;
+        texts.ammo.style.fontSize = 13; texts.ammo.text = fmt(game.hp[t]); texts.ammo.x = x - 22 * U; texts.ammo.y = y - 26 * U; texts.ammo.style.fill = 0xffffff;
         const sx = x - 42 * U, sy = y - 26 * U; // shield icon
         if (ta > .3) g.poly([sx, sy - 9, sx + 8, sy - 6, sx + 7, sy + 3, sx, sy + 9, sx - 7, sy + 3, sx - 8, sy - 6].map((v, k) => (k & 1 ? sy : sx) + (v - (k & 1 ? sy : sx)) * U)).stroke({ width: 1.6, color: 0xffffff, alpha: .85 });
         if (ta > .3) g.poly([sx, sy - 4, sx + 4, sy - 2.5, sx + 3.5, sy + 2, sx, sy + 4.5, sx - 3.5, sy + 2, sx - 4, sy - 2.5].map((v, k) => (k & 1 ? sy : sx) + (v - (k & 1 ? sy : sx)) * U)).fill({ color: team.hex, alpha: 1 });
@@ -1227,11 +1250,16 @@
         if (ta > .3) g.roundRect(x - 72 * U, y + 9 * U, 144 * U, 26 * U, 3).fill({ color: 0x02060c, alpha: .55 }).stroke({ width: 1, color: 0xc8e6fa, alpha: .25 });
         const gx2 = x - 56 * U, gy2 = y + 22 * U; // gun icon
         if (ta > .3) g.rect(gx2 - 10 * U, gy2 - 1, 20 * U, 2).fill({ color: 0xffffff, alpha: .8 }); if (ta > .3) g.rect(gx2 - 4 * U, gy2 + 1, 2, 3).fill({ color: 0xffffff, alpha: .8 });
-        texts.sec.style.fontSize = 11; texts.sec.text = fmtScore(secondary); texts.sec.style.fill = team.hex === 0xffa514 ? 0xffe0b0 : 0xffffff;
+        texts.sec.style.fontSize = 11; texts.sec.text = fmtScore(Math.round(game.ammo[t])); texts.sec.style.fill = team.hex === 0xffa514 ? 0xffe0b0 : 0xffffff;
         texts.sec.x = x + 8 * U; texts.sec.y = y + 22 * U;
       }
     }
 
+    drawFloaters(game) {
+      if (!this.floatPool) { this.floatPool = []; for (let i = 0; i < 10; i++) { const tx = new PIXI.Text({ text: '', style: { fontFamily: 'Arial, "PingFang SC", sans-serif', fontSize: 18, fontWeight: '900', fill: 0xffffff, stroke: { color: 0x000000, width: 3 } } }); tx.anchor.set(.5); tx.visible = false; this.hud.addChild(tx); this.floatPool.push(tx); } }
+      game.floaters = game.floaters.filter(f => (f.life -= 1 / 60) > 0).slice(-10);
+      this.floatPool.forEach((tx, i) => { const f = game.floaters[i]; tx.visible = !!f; if (!f) return; tx.text = f.text; tx.style.fill = TEAMS[f.team].hex; tx.x = AX + f.x; tx.y = AY + f.y - (2 - f.life) * 18; tx.alpha = Math.min(1, f.life); });
+    }
     drawMeters(game) {
       const g = this.meterG; g.clear();
       const specs = [
@@ -1287,7 +1315,7 @@
       this.drawShots(game);
       this.syncSparks(game);
       this.drawBases(game);
-      this.drawMeters(game);
+      this.drawMeters(game); this.drawFloaters(game);
 
       this.pauseG.visible = game.paused;
       this.pauseTxt.visible = game.paused;
