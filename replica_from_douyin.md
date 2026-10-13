@@ -17,10 +17,10 @@ Unity 机制参考：`refs/UnityDotsBallBattle`（`GridCollisionSystem`：子弹
 - [x] Unity 规则：子弹碰到非己方格 → 涂色 → 销毁（大球可持续推进）
 - [x] 开局四色从四角向中心推开
 
-## 子弹成长（演示 0–18s）
+## 子弹成长（演示 0–16s）
 - [x] 早期（≈0–30%）：短白点 / 点射
 - [x] 中期（≈30% 后）：细长霓虹光束拖尾
-- [x] 大号半透明大球，粗体 M 标签（随成长变大，如数 M～数十 M）
+- [x] 大号半透明大球，粗体 M 标签（随成长变大）
 - [ ] 后期发丝网（完整长片再加重；本短片不做）
 
 ## 规则/成长
@@ -33,6 +33,6 @@ Unity 机制参考：`refs/UnityDotsBallBattle`（`GridCollisionSystem`：子弹
 | 文件 | 说明 |
 |------|------|
 | `marble_war_replica.py` | 复刻渲染脚本 |
-| `marble_replica_demo.mp4` | 约 18s · 1920×1080 · H.264 |
+| `marble_replica_demo.mp4` | ~16s · 1920×1080 · H.264 |
 | `replica_from_douyin.md` | 本清单 |
 | `marble_replica_demo_preview_*.png` | 抽帧预览 |

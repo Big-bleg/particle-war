@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 FONT_B = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 FPS, W, H = 30, 1920, 1080
-DEMO_SEC = 18.0
-DEMO_F = int(DEMO_SEC * FPS)  # 540
+DEMO_SEC = 16.0
+DEMO_F = int(DEMO_SEC * FPS)  # 480
 
 # layout: left ~38% plinko, right square arena
 LEFT_W = int(W * 0.38)
