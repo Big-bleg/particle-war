@@ -16,6 +16,7 @@ import pymunk
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+FONT_REG = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 FPS, W, H = 30, 1920, 1080
 G = 900                                  # battlefield size
 MX, MY = W - G - 18, (H - G) // 2        # map origin
@@ -33,7 +34,7 @@ GRAVITY = 420.0                          # px/s^2 — followable (slower than pr
 VMAX = 300.0                             # px/s clamp — slow cap
 BALL_R = 9                               # small so exact 1/mult widths fit (16× = 2r+5)
 PAINT_COST = 0.012
-PROT_R = G / 8.0                        # protected circle radius around each base (~1/8 map)
+PROT_R = (G / 8.0) * (2.0 / 3.0)         # protect radius = prior × 2/3 (was G/8)
 BIG_V_REF = 18.0                        # reference numeric value for 「1×」visual size
 BIG_D0 = G / 18.0                       # diameter at val≈BIG_V_REF (reasonable large ball)
 BIG_D_MIN = G / 40.0                    # floor diameter for tiny numbers
@@ -67,11 +68,19 @@ class V_TITLE:
 
 # ---------------------------------------------------------------- helpers
 _fc = {}
+_fc_reg = {}
 def font(sz):
     sz = max(10, int(sz))
     if sz not in _fc:
         _fc[sz] = ImageFont.truetype(FONT, sz)
     return _fc[sz]
+
+def font_reg(sz):
+    """Regular weight — right-map HUD (ammo/score/HP/Boss/floats)."""
+    sz = max(10, int(sz))
+    if sz not in _fc_reg:
+        _fc_reg[sz] = ImageFont.truetype(FONT_REG, sz)
+    return _fc_reg[sz]
 
 
 def ctext(d, cx, y, s, fn, fill, sw=2, sf=(0, 0, 0)):
@@ -210,23 +219,37 @@ class PlinkoLayout:
         self.ridge_h = 0.0
         self.bars = []
         self.low_bars = []
-        # Exactly FOUR rows of sparse staggered pegs (2 upper + 2 lower), not full-width dense
-        self.peg_r = 8.0
+        # Upper 4 rows + lower 4 rows; dense staggered (tight x-spacing, mid-gap fillers)
+        self.peg_r = 7.5
         self.pegs = []
-        def add_row(y, n, stagger):
-            # leave side margins; fewer pegs per row (~5–6)
-            sp = (PW - 160) / max(1, n - 1)
-            x0 = 80.0 + (sp * 0.5 if stagger else 0.0)
-            for k in range(n):
-                x = x0 + k * sp
-                if 50 <= x <= PW - 50:
+        def add_row(y, stagger):
+            """Full-width staggered row with tight spacing + mid-gap filler pegs."""
+            margin = 42.0
+            sp = 48.0  # tight left-right spacing (was ~wide)
+            xs = []
+            x = margin + (sp * 0.5 if stagger else 0.0)
+            while x <= PW - margin:
+                xs.append(x)
+                x += sp
+            # insert extra peg into each middle gap → denser pattern
+            filled = []
+            for i, x in enumerate(xs):
+                filled.append(x)
+                if i + 1 < len(xs):
+                    filled.append(0.5 * (xs[i] + xs[i + 1]))
+            for x in filled:
+                if 36 <= x <= PW - 36:
                     self.pegs.append((float(x), float(y)))
-        # upper half: 2 rows
-        add_row(LAYER1_Y + 110, 5, False)
-        add_row(LAYER1_Y + 175, 6, True)
-        # lower half: 2 rows
-        add_row(LEDGE_Y + SLOT_H + 70, 5, False)
-        add_row(LEDGE_Y + SLOT_H + 140, 6, True)
+        # upper zone (spawn → ledge): 4 rows
+        uy0 = LAYER1_Y + 85
+        ugap = 42.0
+        for r in range(4):
+            add_row(uy0 + r * ugap, stagger=(r % 2 == 1))
+        # lower zone (below 倍率 → items): 4 rows
+        ly0 = LEDGE_Y + SLOT_H + 45
+        lgap = 40.0
+        for r in range(4):
+            add_row(ly0 + r * lgap, stagger=(r % 2 == 1))
 
 
     def slot_at(self, x):
@@ -732,7 +755,7 @@ class Demo:
         else:
             # normal: slower + denser small-particle jet
             self.fire_cd[t] = self.fire_period
-            speed = 1.45; energy = 9.0; r0 = 28.0; n_shot = 12; spread = 0.42; kind = 0  # density ×4 (n_shot 3→12)
+            speed = 3.6; energy = 10.0; r0 = 28.0; n_shot = 12; spread = 0.42; kind = 0  # density ×4; visible travel
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
             a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
@@ -843,12 +866,11 @@ class Demo:
             if spd < 1e-6:
                 self.palive[i] = False
                 continue
-            # number of 1-px steps this frame (do NOT leap): clamp to ceil(speed)
-            n_steps = max(1, min(3, int(math.ceil(spd))))
+            # pixel steps this frame — enough that motion is visible (~speed cells)
+            n_steps = max(1, min(6, int(math.ceil(spd))))
             ux, uy = vx / spd, vy / spd
-            # big / numbered can take one extra step but still pixel-wise
             if kind == 2:
-                n_steps = min(4, n_steps + 1)
+                n_steps = min(7, n_steps + 1)
 
             for _ in range(n_steps):
                 if not self.palive[i]:
@@ -911,22 +933,21 @@ class Demo:
                         self.palive[i] = False
                     continue
 
-                # blank or enemy → stop HERE, paint this one pixel, consume
+                # blank or enemy → paint a small footprint, then consume (visible dots)
                 if o == nt or (o < nt and o != t):
-                    self.grid[iy, ix] = t
+                    pr = 2 if kind == 0 else (3 if kind == 2 else 2)
+                    for dy in range(-pr, pr + 1):
+                        for dx in range(-pr, pr + 1):
+                            if dx * dx + dy * dy > pr * pr:
+                                continue
+                            x2, y2 = ix + dx, iy + dy
+                            if not (0 <= x2 < G and 0 <= y2 < G):
+                                continue
+                            oo = int(self.grid[y2, x2])
+                            if oo == nt or (oo < nt and oo != t):
+                                self.grid[y2, x2] = t
                     self.fx[iy, ix] = np.maximum(
                         self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
-                    # 大球: may claim a few adjacent frontier pixels (still no leap)
-                    if kind == 2 and self.ppow[i]:
-                        for dy in (-1, 0, 1):
-                            for dx in (-1, 0, 1):
-                                if dx == 0 and dy == 0:
-                                    continue
-                                x2, y2 = ix + dx, iy + dy
-                                if 0 <= x2 < G and 0 <= y2 < G:
-                                    oo = int(self.grid[y2, x2])
-                                    if oo == nt or (oo < nt and oo != t):
-                                        self.grid[y2, x2] = t
                     self.palive[i] = False
                     self.pval[i] = 0
                     break
@@ -950,7 +971,7 @@ class Demo:
                 return max(8.0, big_ball_radius(self.pval[i], 1.0) * 0.9)
             if self.ppow[i]:
                 return 10.0
-            return 5.5
+            return 6.5
 
         def _w(i):
             p = float(self.pval[i])
@@ -1265,7 +1286,7 @@ def build_static_bg(layout: PlinkoLayout, nt):
 
     # title bar
     d.rounded_rectangle((MX, 8, MX + G, MY - 12), 10, fill=(14, 18, 40), outline=(60, 120, 200), width=1)
-    ctext(d, MX + G / 2, 14, getattr(V_TITLE, "t", "粒子领地大战 v5 · 机制演示"), font(28), (200, 230, 255), 2)
+    ctext(d, MX + G / 2, 14, getattr(V_TITLE, "t", "粒子领地大战 v5 · 机制演示"), font_reg(28), (200, 230, 255), 1)
 
     return bg
 
@@ -1386,12 +1407,12 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
                 continue
             bx, by = demo.bases[t]
             X, Y = MX + bx, MY + by
-            ctext(d, X, Y - PROT_R * 0.55, fmt_abbr(demo.ammo_disp[t]), font(22), (20, 20, 30), 2)
+            ctext(d, X, Y - PROT_R * 0.55, fmt_abbr(demo.ammo_disp[t]), font_reg(22), (20, 20, 30), 1)
             score = int(demo.share[t] * G * G)
-            ctext(d, X, Y + PROT_R * 0.35, f"{score:,}", font(14), (30, 30, 40), 1)
+            ctext(d, X, Y + PROT_R * 0.35, f"{score:,}", font_reg(14), (30, 30, 40), 1)
             # shield number if any
             if demo.shield_hp[t] > 0:
-                ctext(d, X + PROT_R * 0.55, Y - 10, f"盾{int(demo.shield_hp[t])}", font(14), (80, 200, 255), 1)
+                ctext(d, X + PROT_R * 0.55, Y - 10, f"盾{int(demo.shield_hp[t])}", font_reg(14), (80, 200, 255), 1)
             # HP bar under base
             hw = PROT_R * 1.1
             hf = max(0.0, demo.hp[t] / demo.max_hp[t])
@@ -1416,18 +1437,19 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
                 fill = tuple(int(180 + v * 0.25) for v in c)
                 d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=fill, outline=(255, 255, 255), width=2)
                 fs = max(11, int(10 + rad * 0.55))
-                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font(fs), (30, 30, 40), 2)
+                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font_reg(fs), (30, 30, 40), 1)
             elif demo.ppow[i]:
                 pop = float(getattr(demo, "pscale", np.ones(NMAX))[i])
                 rad = max(6.0, (8.0 + 7.0 * frac) * pop)
                 c = TEAMS[t][1]
                 d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c, outline=(255, 255, 255), width=2)
                 fs = max(11, int(12 + 6 * frac * pop))
-                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font(fs), (255, 255, 255), 2)
+                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font_reg(fs), (255, 255, 255), 1)
             else:
-                # tiny white dots (2–3px), slow scattered cloud
-                rad = 1.6
-                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=(255, 255, 255))
+                # visible white dots (~2.8px radius ≈ 5–6px diameter)
+                rad = 2.8
+                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=(255, 255, 255),
+                          outline=(230, 235, 245))
 
         # ---- boss ----
         if demo.boss is not None:
@@ -1440,13 +1462,13 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
             hp_f = b["hp"] / b["maxhp"]
             d.rectangle((X - hw / 2, Y - r - 24, X + hw / 2, Y - r - 12), fill=(40, 20, 50))
             d.rectangle((X - hw / 2, Y - r - 24, X - hw / 2 + hw * hp_f, Y - r - 12), fill=(255, 80, 200))
-            ctext(d, X, Y - 12, "BOSS", font(28), (255, 180, 255), 2)
+            ctext(d, X, Y - 12, "BOSS", font_reg(28), (255, 180, 255), 1)
             # floating damage numbers
             for ft in demo.boss_floats:
                 fx, fy, _, life, dmg, tm = ft
                 col = TEAMS[int(tm)][1]
                 fs = 14 + min(28, int(dmg))
-                ctext(d, MX + fx, MY + fy, f"-{int(max(1, dmg))}", font(fs), col, 2)
+                ctext(d, MX + fx, MY + fy, f"-{int(max(1, dmg))}", font_reg(fs), col, 1)
 
         # reward overlay after boss kill
         if demo.boss_rewards is not None and demo.boss_dead_f >= 0:
@@ -1455,14 +1477,14 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
                 d.rounded_rectangle((MX + 80, MY + 80, MX + G - 80, MY + 220), 12,
                                     fill=(20, 16, 40, ) if False else (20, 16, 40),
                                     outline=(255, 220, 120), width=2)
-                ctext(d, MX + G / 2, MY + 95, "Boss 击破 · 8×奖池按伤害分配", font(26), (255, 230, 140), 2)
+                ctext(d, MX + G / 2, MY + 95, "Boss 击破 · 8×奖池按伤害分配", font_reg(26), (255, 230, 140), 1)
                 # shares
                 xs = MX + G / 2 - (nt - 1) * 70
                 for t, s in enumerate(demo.boss_rewards):
                     c = TEAMS[t][1]
-                    ctext(d, xs + t * 140, MY + 140, f"{names[t]}", font(20), c, 2)
+                    ctext(d, xs + t * 140, MY + 140, f"{names[t]}", font_reg(20), c, 1)
                     ctext(d, xs + t * 140, MY + 168, f"→ 球×{s}" if s else "→ 0",
-                          font(24), (255, 240, 180) if s else (140, 140, 160), 2)
+                          font_reg(24), (255, 240, 180) if s else (140, 140, 160), 1)
 
         # top banner (left-of-map / over map top)
         if demo.banner:
@@ -1471,7 +1493,7 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
             ctext(d, (PX0 + PX1) / 2, 55, txt, font(24), col, 2)
 
         # timer
-        d.text((MX + 12, MY + 8), f"{fi / FPS:04.1f}s", font=font(20), fill=(200, 220, 255))
+        d.text((MX + 12, MY + 8), f"{fi / FPS:04.1f}s", font=font_reg(20), fill=(200, 220, 255))
 
         # opening title cards
         if fi < 25:
