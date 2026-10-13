@@ -1,13 +1,13 @@
 (() => {
   'use strict';
 
-  const W = 1920, H = 1080, LEFT = 760, G = 1000, AX = 860, AY = 40, GS = 168, S = G / GS;
+  const W = 1920, H = 1080, LEFT = 760, G = 1000, AX = 860, AY = 40, WS = 1.75, GS = Math.round(168 * WS), S = G / GS; // world scale: finer grid, smaller props
   const PX = 0, PW = 760, BAND = 430, ITEMY = 928, ITEMH = 124;
   // 1:1 ref layout (measured from douyin_detail frames, 1920x1080 space)
   const LEDGE_TOP = 430, LEDGE_BOT = 540, LGROUP = [[0, 222], [538, 760]], GAP = [222, 538];
   const SLOT_X = [[2, 76, 0], [76, 148, 1], [148, 222, 2], [538, 612, 3], [612, 684, 4], [684, 758, 5]]; // x0,x1,slot
   const ITEM_X = [0, 138, 290, 448, 601, 760];
-  const MULT = [8, 4, 2, 2, 4, 8], NAMES = ['风暴', '机枪', '护盾', '大球', '狙击'];
+  const MULT = [8, 4, 2, 2, 4, 8], NAMES = ['散弹', '机枪', '护盾', '大球', '狙击'];
   const TEAMS = [
     { name: '红队', c: [255, 20, 70], hi: [255, 90, 130], glow: [255, 40, 90], edge: [255, 200, 220], hex: 0xff1446 },
     { name: '绿队', c: [0, 230, 140], hi: [80, 255, 200], glow: [0, 255, 170], edge: [160, 255, 220], hex: 0x00e68c },
@@ -15,8 +15,8 @@
     { name: '橙队', c: [255, 165, 20], hi: [255, 220, 80], glow: [255, 185, 40], edge: [255, 240, 180], hex: 0xffa514 }
   ];
   const NEUTRAL = 4, BASES = [[120, 120], [880, 120], [120, 880], [880, 880]], MATCH = 960;
-  const MAX_SHOTS = 3500, SILK_CAP = 7000, RIBBON_CAP = 1800;
-  const TRES = GS * 2; // 2x upload with domain-warped sampling → organic foam
+  const MAX_SHOTS = 6000, SILK_CAP = 7000, RIBBON_CAP = 1800;
+  const TRES = GS; // 2x upload with domain-warped sampling → organic foam
 
   const canvas = document.getElementById('game');
   const overlay = document.getElementById('overlay');
@@ -97,7 +97,7 @@
       // asymmetric momentum: each team has a drifting fire-power multiplier
       this.power = [0, 1, 2, 3].map(() => rand(.8, 1.25)); this.powerClock = 0;
       this.sweepPh = [0, 1, 2, 3].map(() => rand(0, 6.28)); this.sweepSp = [0, 1, 2, 3].map(() => rand(.15, .4));
-      this.events = []; this.lasers = []; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
+      this.events = []; this.lasers = []; this.stat = { die: 0, paint: 0, cancel: 0 }; this.opened = false; this.opening = null; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
       this.ribbons = []; this.silk = new Float32Array(SILK_CAP * 7); this.silkCount = 0;
       this.stars = Array.from({ length: 220 }, () => [rand(0, G), rand(0, G), rand(.2, 1), rand(.5, 2.2)]);
       this.frame = 0; this.dirty = true; this.terrainAge = 0;
@@ -123,8 +123,19 @@
       rows.forEach((y, i) => { const n = i % 2 ? 4 : 3, step = (LEFT - 120) / n; for (let k = 0; k < n; k++) { const yy = y + rand(-22, 22); a.push([60 + step * (k + .5) + rand(-40, 40), yy, rand(-2, 2), rand(-1, 1), yy - 18, yy + 18]); } });
       return a;
     }
-    makePegs() { return this.lattice([105, 190, 275, 360]); }
-    makeLowerPegs() { return this.lattice([590, 680, 770, 860]); }
+    // rotating hexagon peg clusters (kinematic): 6 corner pegs + centre peg, constant angular speed
+    makeClusters() { return [[190, 250, .9], [570, 250, -.9], [190, 725, -.9], [570, 725, .9]].map(([cx, cy, w], i) => ({ cx, cy, w, a0: i * .5, R: 62, zone: cy > 500 ? 1 : 0 })); }
+    clusterPegs(zone) {
+      const out = [];
+      for (const C of this.clusters) {
+        if (C.zone !== zone) continue;
+        out.push([C.cx, C.cy, 0, 0]);
+        for (let k = 0; k < 6; k++) { const a = C.a0 + C.w * this.t + k * Math.PI / 3, x = C.cx + Math.cos(a) * C.R, y = C.cy + Math.sin(a) * C.R; out.push([x, y, -Math.sin(a) * C.R * C.w, Math.cos(a) * C.R * C.w]); }
+      }
+      return out;
+    }
+    makePegs() { this.clusters = this.makeClusters(); return this.clusterPegs(0); }
+    makeLowerPegs() { return this.clusterPegs(1); }
     // cellular smoothing: rounds bullet spikes into foamy blobs/tongues (no radial auto-expand)
     smoothFront() {
       const g = this.grid, out = g.slice(), c = [0, 0, 0, 0, 0];
@@ -198,13 +209,13 @@
       if (kind === 0) kind = age < .12 ? 0 : age < .45 ? 1 : age < .75 ? 1 : 4;
       let n = count ?? (kind === 0 ? 8 : kind === 1 ? 10 : kind === 4 ? 12 : 1);
       if (kind === 2) n = 1; if (kind === 3) n = count ?? 7;
-      const speed = kind === 2 ? 2.2 : kind === 3 ? 15 : kind === 4 ? 8.2 : kind === 1 ? 9.5 : 7.4;
-      const spread = kind === 2 ? 0 : kind === 3 ? .02 : kind === 4 ? .07 : kind === 1 ? .07 : .075;
+      const speed = kind === 5 ? 5.2 : kind === 2 ? 2.2 : kind === 3 ? 9 : kind === 4 ? 4.6 : kind === 1 ? 5 : 4.2;
+      const spread = kind === 2 ? 0 : kind === 3 ? .02 : kind === 5 ? .349 / Math.max(1, (count ?? 48) - 1) : .011; // normal jet: tight (~10° total)
       const cost = kind === 2 ? 220e3 : kind === 3 ? 28e3 : Math.max(200, n * 260);
       this.ammo[team] = Math.max(0, this.ammo[team] - cost);
       for (let k = 0; k < n && this.shots.length < MAX_SHOTS; k++) {
-        const a = baseAng + (k - (n - 1) / 2) * spread + rand(-.02, .02);
-        const v = rand(speed * .9, speed * 1.12);
+        const a = baseAng + (k - (n - 1) / 2) * spread + (kind === 5 ? rand(-.03, .03) : rand(-.008, .008));
+        const v = kind === 5 ? rand(speed * .7, speed * 1.25) : rand(speed * .9, speed * 1.12);
         this.shots.push({
           team, x: bx + Math.cos(a) * 10, y: by + Math.sin(a) * 10,
           vx: Math.cos(a) * v, vy: Math.sin(a) * v, kind, life: 0,
@@ -217,8 +228,7 @@
       const bag = team === this.player ? this.items : this.aiItems[team];
       if (bag[i] <= 0 || (i === 3 && this.t < 45)) return false; bag[i]--;
       const a = this.aim[team];
-      if (i === 0 && (this.t < 120 || this.waves.some(w => w.team === team) || this.t - (this.lastStorm[team] || -99) < 35)) { for (let k = 0; k < 30; k++) this.spawn(team, 1, 1, a + (k - 14.5) * .05); }
-      else if (i === 0) { this.lastStorm[team] = this.t; this.waves.push({ team, r: 70, a: a, half: .55 + Math.min(.35, this.t / 600), sp: 150 + this.t * .4, life: 0 }); this.events.push({ t: this.t, team, kind: 'storm' }); }
+      if (i === 0) { this.spawn(team, 5, 48, a); this.events.push({ t: this.t, team, kind: 'shotgun' }); } // 散弹: 48-pellet burst in a ~41° cone
       if (i === 1) { for (let k = 0; k < 14; k++) this.spawn(team, 0, 3, a + rand(-.28, .28)); }
       if (i === 2) { this.shield[team] = 1; this.sparks.push({ x: BASES[team][0], y: BASES[team][1], team, life: 1, burst: true }); }
       if (i === 3 && this.shots.filter(q => q.kind === 2).length >= (this.t > 420 ? 2 : 1)) { bag[i]++; return false; }
@@ -251,16 +261,16 @@
       if (gx < 0 || gy < 0 || gx >= GS || gy >= GS) return true;
       const owner = this.grid[this.id(gx, gy)];
       if (owner === p.team) return false;
-      if (owner < 4 && this.shield[owner] > .02) {
+      if (owner < 4 && p.kind !== 5 && this.shield[owner] > .02) {
         const [bx, by] = BASES[owner];
-        if (Math.hypot(p.x - bx, p.y - by) < 100) {
+        if (Math.hypot(p.x - bx, p.y - by) < 100 / WS) {
           this.shield[owner] = Math.max(0, this.shield[owner] - (p.kind === 2 ? .07 : .0025));
           this.sparks.push({ x: p.x, y: p.y, team: owner, life: .7 });
           return true;
         }
       }
-      const radius = p.kind === 2 ? 42 : p.kind === 3 ? 14 : p.kind === 1 ? 8 : p.kind === 4 ? 6 : 5.5;
-      this.paint(p.x, p.y, p.team, radius * (1 + Math.min(1.2, this.t / 200)) * (this.t < 70 ? .5 + .5 * this.t / 70 : 1));
+      // UnityDots rule: a bullet entering a foreign/neutral cell dies and converts exactly that one cell
+      { const i = gy * GS + gx; this.grid[i] = p.team; this.heat[i] = 1; this.score[p.team] += 35; this.dirty = true; this.stat.die++; this.stat.paint++; }
       if (Math.random() < .35) this.sparks.push({ x: p.x, y: p.y, team: p.team, life: .55 + Math.random() * .3 });
       if (p.kind === 2) { p.value *= .995; p.life++; p.v0 = p.v0 || p.value; return p.life > 260 || p.value < p.v0 * .3; }
       return true;
@@ -295,12 +305,8 @@
         this.nextMarble[t] -= dt;
         if (this.nextMarble[t] <= 0 && this.marbles.length < 20) { this.marble(t); this.nextMarble[t] = rand(.6, 1.5) * clamp(1.4 - this.t / 600, .6, 1.4); }
       }
-      if (this.marbles.length > 18) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
-      for (const P of [this.pegs, this.lowerPegs]) for (const q of P) {
-        q[0] += q[2] * dt; q[1] += q[3] * dt;
-        if (q[0] < 40 || q[0] > LEFT - 40) q[2] *= -1;
-        if (q[1] < q[4] || q[1] > q[5]) q[3] *= -1;
-      }
+      if (m => 0, this.marbles.length > 18) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
+      this.pegs = this.clusterPegs(0); this.lowerPegs = this.clusterPegs(1);
       for (const f of this.slotFlash) if (f) f.life -= dt * 1.5;
       for (const f of this.itemFlash) if (f) f.life -= dt * 1.5;
       const live = [];
@@ -314,30 +320,49 @@
           continue;
         }
         m.trail.push([m.x, m.y]); if (m.trail.length > 9) m.trail.shift();
-        m.vy += 55 * dt;
-        const spd = Math.hypot(m.vx, m.vy); if (spd > 320) { m.vx *= 320 / spd; m.vy *= 320 / spd; }
-        m.x += m.vx * dt; m.y += m.vy * dt;
-        const pr = m.zone ? this.lowerPegs : this.pegs;
-        for (const q of pr) {
-          const dx = m.x - q[0], dy = m.y - q[1], rr = m.r + 6;
-          if (dx * dx + dy * dy < rr * rr) {
-            const d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d, dot = m.vx * nx + m.vy * ny;
-            if (dot < 0) { m.vx -= 1.9 * dot * nx; m.vy -= 1.9 * dot * ny; }
-            m.x = q[0] + nx * rr; m.y = q[1] + ny * rr;
-            m.path.push([m.x, m.y]);
+        // proper rigid-body step: semi-implicit Euler, 6 substeps, circle-vs-circle / circle-vs-AABB contacts
+        const SUB = 6, h = dt / SUB, E = .6, MU = .08, pr = m.zone ? this.lowerPegs : this.pegs;
+        for (let st = 0; st < SUB; st++) {
+          m.vy += GRAV * h;
+          // buoyancy strip (浮力区) between the X2|X2 ledges acts as a one-way elastic membrane:
+          // a marble passes only if its impact speed beats a value-dependent threshold (heavier = sinks easier),
+          // otherwise it bounces (e=.6) off a slightly crowned surface and rolls out toward the X2 cups.
+          if (!m.zone && !m.passing && m.x > GAP[0] && m.x < GAP[1] && m.y + m.r > BUOY_Y0 && m.y < BUOY_Y0 + 24) {
+            const thr = PASS_V / (1 + Math.log2(m.v) / 10);
+            if (m.vy > thr) { m.passing = 1; (this.gateLog ||= []).push({ vIn: m.vy, thr, passed: 1, v: m.v }); }
+            else if (m.vy > 0) {
+              if (m.vy > 40) (this.gateLog ||= []).push({ vIn: m.vy, thr, passed: 0, v: m.v });
+              const cx = (GAP[0] + GAP[1]) / 2, sx = clamp((m.x - cx) / ((GAP[1] - GAP[0]) / 2), -1, 1) * .3 + (m.x >= cx ? .06 : -.06), nl = Math.hypot(sx, 1);
+              this.contact(m, sx / nl, -1 / nl, Math.max(0, m.y + m.r - BUOY_Y0) / nl, E, MU, true);
+            }
           }
+          const spd = Math.hypot(m.vx, m.vy); if (spd > 520) { m.vx *= 520 / spd; m.vy *= 520 / spd; }
+          m.x += m.vx * h; m.y += m.vy * h;
+          for (const q of pr) {
+            const dx = m.x - q[0], dy = m.y - q[1], rr = m.r + PEG_R, d2 = dx * dx + dy * dy;
+            if (d2 < rr * rr) { const d = Math.sqrt(d2) || 1e-3; this.contact(m, dx / d, dy / d, rr - d, E, MU, true, q[2], q[3]); }
+          }
+          for (const R of PHYS_RECTS) {
+            const cx = clamp(m.x, R[0], R[2]), cy = clamp(m.y, R[1], R[3]), dx = m.x - cx, dy = m.y - cy, d2 = dx * dx + dy * dy;
+            if (d2 < m.r * m.r) {
+              if (d2 > 1e-6) { const d = Math.sqrt(d2); this.contact(m, dx / d, dy / d, m.r - d, E, MU, true); }
+              else { const up = m.y - R[1]; this.contact(m, 0, -1, up + m.r, E, MU, true); }
+            }
+          }
+          if (m.x < m.r) this.contact(m, 1, 0, m.r - m.x, E, MU, true);
+          if (m.x > LEFT - m.r) this.contact(m, -1, 0, m.x - (LEFT - m.r), E, MU, true);
         }
-        if (m.x < m.r + 4) { m.x = m.r + 4; m.vx = Math.abs(m.vx); m.path.push([m.x, m.y]); }
-        if (m.x > LEFT - m.r - 4) { m.x = LEFT - m.r - 4; m.vx = -Math.abs(m.vx); m.path.push([m.x, m.y]); }
-        if (!m.zone && m.y > LEDGE_TOP + 20) {
+        // marbles too wide for a cup come to rest on the pillar tops: count them as landed in that cup
+        m.rest = (!m.zone && m.y > 280 && (m.x < GAP[0] || m.x > GAP[1]) && Math.hypot(m.vx, m.vy) < 40) ? (m.rest || 0) + dt : 0;
+        if (!m.zone && (m.y > LEDGE_TOP + 20 || m.rest > .4) && (m.x < GAP[0] || m.x > GAP[1] || m.y > BUOY_Y1)) {
           const inGroup = m.x < GAP[0] || m.x > GAP[1];
           if (inGroup) {
             const sl = SLOT_X.find(z => m.x >= z[0] && m.x < z[1]); const slot = sl ? sl[2] : (m.x < GAP[0] ? 2 : 3);
             this.hit[slot]++; this.award(m.team, slot, m.v); continue;
           }
-          m.zone = 1; m.path = [];
+          m.zone = 1; m.path = []; m.passed = 1;
         }
-        if (m.zone && m.y > ITEMY + 30) {
+        if (m.zone && m.y > 1015) {
           let it = 0; for (let k = 0; k < 5; k++) if (m.x >= ITEM_X[k]) it = k;
           this.giveItem(m.team, it);
           if (this.marbles.filter(q => q.lift).length < 4) { m.lift = 1; m.lx = rand(-110, 110); m.vy = -120; m.vx *= .3; m.path = []; live.push(m); }
@@ -346,7 +371,30 @@
         if (m.path.length > 2) m.path.shift();
         live.push(m);
       }
+      // marble–marble impulses (mass ∝ r²), positional correction to prevent overlap
+      const act = live.filter(m => !m.wait && !m.lift);
+      for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
+        const A = act[i], B = act[j]; if (A.zone !== B.zone) continue;
+        const dx = B.x - A.x, dy = B.y - A.y, rr = A.r + B.r, d2 = dx * dx + dy * dy;
+        if (d2 >= rr * rr || d2 < 1e-6) continue;
+        const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, ma = A.r * A.r, mb = B.r * B.r, im = 1 / ma + 1 / mb, pen = rr - d;
+        A.x -= nx * pen * (1 / ma) / im; A.y -= ny * pen * (1 / ma) / im; B.x += nx * pen * (1 / mb) / im; B.y += ny * pen * (1 / mb) / im;
+        const vn = (B.vx - A.vx) * nx + (B.vy - A.vy) * ny; if (vn > 0) continue;
+        const jj = -(1 + .6) * vn / im;
+        A.vx -= jj * nx / ma; A.vy -= jj * ny / ma; B.vx += jj * nx / mb; B.vy += jj * ny / mb;
+      }
       this.marbles = live.slice(-80);
+    }
+    contact(m, nx, ny, pen, e, mu, rec, bvx = 0, bvy = 0) {
+      // contact against a (possibly kinematic) body moving at (bvx,bvy): resolve in the body's frame
+      m.x += nx * pen; m.y += ny * pen;
+      m.vx -= bvx; m.vy -= bvy;
+      const vn = m.vx * nx + m.vy * ny; if (vn >= 0) { m.vx += bvx; m.vy += bvy; return; }
+      const tx = -ny, ty = nx, vt = m.vx * tx + m.vy * ty;
+      const e2 = -vn < 25 ? 0 : e;                    // kill micro-bounces → no jitter
+      const vn2 = -vn * e2, vt2 = vt - Math.sign(vt) * Math.min(Math.abs(vt), mu * (1 + e2) * -vn);
+      m.vx = nx * vn2 + tx * vt2 + bvx; m.vy = ny * vn2 + ty * vt2 + bvy;
+      if (rec && -vn > 40) { m.path.push([m.x, m.y]); if (m.path.length > 2) m.path.shift(); }
     }
     sampleFrontierSparks() {
       if (this.frame % 3 !== 0) return;
@@ -378,14 +426,14 @@
         if (t !== this.player || this.autoAim) {
           // centre-focused opening, then a widening sweep across own quadrant (ref: beams meet centre at 0:10)
           const [bx, by] = BASES[t], c = Math.atan2(G / 2 - by, G / 2 - bx);
-          if (this.t < 12) { this.aim[t] = c; this.lock[t] = null; }
+          if (!this.opened) { this.aim[t] = c; this.lock[t] = null; }
           else {
             // threat lock: normal bullets within 2x shield radius, big balls within half the map
             let best = null, bd = 1e9;
             if ((this.frame + t) % 3 === 0) {
               for (const q of this.shots) {
                 if (q.team === t) continue;
-                const d = Math.hypot(q.x - bx, q.y - by), lim = q.kind === 2 ? G * .5 : 200;
+                const d = Math.hypot(q.x - bx, q.y - by), lim = q.kind === 2 ? G * .5 : 200 / WS;
                 if (d < lim && d < bd) { bd = d; best = q; }
               }
               this.lock[t] = best;
@@ -403,21 +451,36 @@
           }
         }
         if (t === this.player && this.autoAim) this.playerAim = this.aim[t];
-        this.cool[t] -= dt; if (this.t < 2.5) continue;
+        this.cool[t] -= dt; if (!this.opened) continue;
         const rate = clamp(.11 - this.t * .0001, .04, .11) / this.power[t];
         if (t === this.player) {
           if (!this.autoAim) this.aim[t] = this.playerAim;
           if (this.firing && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 20 ? 10 : 14); this.cool[t] = .04; }
-          else if (this.autoFire && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 12 ? 9 : this.t < 50 ? 12 : 16); this.cool[t] = rate; }
+          else if (this.autoFire && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 12 ? 18 : this.t < 50 ? 24 : 32); this.cool[t] = rate; }
         } else if (this.cool[t] <= 0) {
-          this.spawn(t, 0, this.t < 12 ? 9 : this.t < 50 ? 12 : 16);
+          this.spawn(t, 0, this.t < 12 ? 18 : this.t < 50 ? 24 : 32);
           this.cool[t] = rate * (.7 + Math.random() * .35);
           if (Math.random() < (this.t < 40 ? .002 : this.t < 120 ? .02 : .06) * this.power[t] && this.aiItems[t].some(v => v > 0)) {
             const i = this.aiItems[t].findIndex(v => v > 0); this.use(t, i);
           }
         }
       }
-      if (this.t > 2.5 && this.t < 14) { this.growClock = (this.growClock || 0) + dt; if (this.growClock > .4) { this.growClock = 0; this.growBases(5 + Math.min(1, this.t / 10) * 10); } }
+      if (false) { this.growClock = (this.growClock || 0) + dt; if (this.growClock > .4) { this.growClock = 0; this.growBases(5 + Math.min(1, this.t / 10) * 10); } }
+      if (!this.opened) {
+        if (!this.opening && this.t > 1.5) {
+          this.opening = BASES.map(([bx, by], t) => { const a = Math.atan2(G / 2 - by, G / 2 - bx); return { t, x: bx + Math.cos(a) * 30, y: by + Math.sin(a) * 30, vx: Math.cos(a) * 330, vy: Math.sin(a) * 330, trail: [] }; });
+          this.lasers.push(...[0, 1, 2, 3].map(t => ({ team: t, a: this.aim[t], life: .5 })));
+        }
+        if (this.opening) {
+          for (const o of this.opening) { o.trail.push([o.x, o.y]); if (o.trail.length > 30) o.trail.shift(); o.x += o.vx * dt; o.y += o.vy * dt; }
+          if (Math.hypot(this.opening[0].x - G / 2, this.opening[0].y - G / 2) < 14) {
+            // four sniper rounds collide: burst
+            for (let t = 0; t < 4; t++) for (let k = 0; k < 40; k++) { const a = rand(0, 6.283), v = rand(60, 420); this.sparks.push({ x: G / 2, y: G / 2, team: t, life: 1.6, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
+            this.burst = { t: this.t, life: 2 }; this.opened = true; this.opening = null;
+          }
+        }
+      }
+      if (this.burst) { this.burst.life -= dt; if (this.burst.life <= 0) this.burst = null; }
       this.tickMarbles(dt);
       this.powerClock += dt;
       if (this.powerClock > 6) {
@@ -432,7 +495,7 @@
         const h = this.heat, gr = this.grid, f = this.flood ?? -1, kf = Math.pow(.985, 4 * .25 / .25); for (let i = 0; i < h.length; i++) h[i] *= gr[i] === f ? .985 : k;
         this.dirty = true;
       }
-      if (this.t > 150) {
+      if (this.t > 240) {
         const lead = this.share.indexOf(Math.max(...this.share));
         this.flood = lead;
         if (!this.waves.some(w => w.team === lead) && this.t - (this.lastStorm[lead] || -99) > 9) {
@@ -457,36 +520,66 @@
       }
       this.waves = this.waves.filter(w => w.r < (w.big ? 820 : 600) && w.life < 8);
       this.caClock = (this.caClock || 0) + dt;
-      if (this.caClock > .5) { this.caClock = 0; this.smoothFront(); }
+      /* smoothFront disabled: territory changes only by bullets (strict rule) */
 
       const active = [], trailMax = this.t > 80 ? 22 : this.t > 25 ? 16 : 12;
       for (const p of this.shots) {
         p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 260 : trailMax)) p.trail.shift();
         if (p.kind === 2) {
-          const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150);
-          if (!p.brush) { p.brush = 1; p.age = 0; const sp = 3.4; const a = Math.atan2(p.vy, p.vx); p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; }
+          const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS;
+          if (!p.brush) { p.brush = 1; p.age = 0; const sp = 1.8; const a = Math.atan2(p.vy, p.vx); p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; }
           p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt; p.age += dt;
           if (p.x < rr * .6) { p.x = rr * .6; p.vx = Math.abs(p.vx); } if (p.x > G - rr * .6) { p.x = G - rr * .6; p.vx = -Math.abs(p.vx); }
           if (p.y < rr * .6) { p.y = rr * .6; p.vy = Math.abs(p.vy); } if (p.y > G - rr * .6) { p.y = G - rr * .6; p.vy = -Math.abs(p.vy); }
+          // heavy body: bounce off enemy base shields and exchange damage (inferred: ball keeps ≥10%, shield absorbs 5/7 of the ball)
+          p.hitCd = Math.max(0, (p.hitCd || 0) - dt);
+          for (let b = 0; b < 4; b++) {
+            if (b === p.team) continue;
+            const [bx, by] = BASES[b], dx = p.x - bx, dy = p.y - by, d = Math.hypot(dx, dy) || 1, R0 = 92 / WS + rr * .8;
+            if (d < R0) {
+              const nx = dx / d, ny = dy / d, vn = p.vx * nx + p.vy * ny;
+              p.x = bx + nx * R0; p.y = by + ny * R0;
+              if (vn < 0) { p.vx -= 2 * vn * nx; p.vy -= 2 * vn * ny; }
+              if (!p.hitCd) {
+                const ball = p.value, sh = this.ammo[b];
+                this.ammo[b] = Math.max(0, sh - ball * 5 / 7);
+                p.value = Math.max(ball * .1, ball - sh * 1.4);
+                p.hitCd = .6; this.shield[b] = Math.max(0, this.shield[b] - .3);
+                for (let k = 0; k < 30; k++) { const a = rand(0, 6.283), v = rand(40, 260); this.sparks.push({ x: bx + nx * 92 / WS, y: by + ny * 92 / WS, team: b, life: 1, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
+                this.events.push({ t: this.t, team: p.team, kind: 'ballHit', target: b, ball, sh, after: [p.value, this.ammo[b]] });
+              }
+            }
+          }
+          if (p.value < 5e4) continue;
           this.paintSolid(p.x, p.y, p.team, rr * .95);
           p.value *= Math.pow(.97, dt);
           if (p.age < 22) active.push(p);
           continue;
         }
         p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt;
-        if (p.x < -20 || p.y < -20 || p.x > G + 20 || p.y > G + 20) continue;
+        if (p.x < 0 || p.x > G || p.y < 0 || p.y > G) {
+          if ((p.bounce = (p.bounce || 0) + 1) > 2) continue;     // reflect off the arena wall, 15% energy loss, max 2 bounces
+          if (p.x < 0) { p.x = -p.x; p.vx = -p.vx * .85; } else if (p.x > G) { p.x = 2 * G - p.x; p.vx = -p.vx * .85; }
+          if (p.y < 0) { p.y = -p.y; p.vy = -p.vy * .85; } else if (p.y > G) { p.y = 2 * G - p.y; p.vy = -p.vy * .85; }
+          p.trail.push([p.x, p.y]);
+        }
         if (!this.hitShot(p)) active.push(p);
       }
-      this.shots = active;
+      {
+        const bucket = this._bucket || (this._bucket = new Map()); bucket.clear(); const dead = new Set();
+        for (const p of active) { if (p.kind === 2) continue; const k = ((p.y / S) | 0) * GS + ((p.x / S) | 0), q = bucket.get(k); if (q && q.team !== p.team && !dead.has(q)) { dead.add(q); dead.add(p); this.stat.cancel++; this.sparks.push({ x: p.x, y: p.y, team: p.team, life: .4 }); } else bucket.set(k, p); }
+        this.shots = dead.size ? active.filter(p => !dead.has(p)) : active;
+      }
+      if (false) this.shots = active;
       for (const L of this.lasers) L.life -= dt; this.lasers = this.lasers.filter(L => L.life > 0);
       if (this.t > 200 && Math.random() < dt * 1.3) { const tt = (Math.random() * 4) | 0; this.lasers.push({ team: tt, a: this.aim[tt] + rand(-.5, .5), life: 2.6 }); }
-      this.sparks = this.sparks.filter(s => { s.life -= dt * (s.burst ? .7 : 1.8); return s.life > 0; }).slice(-900);
+      this.sparks = this.sparks.filter(s => { s.life -= dt * (s.burst ? .7 : 1.8); if (s.vx) { s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= .985; s.vy *= .985; } return s.life > 0; }).slice(-900);
       for (const s of this.frontierSparks) { s.life -= dt * 1.4; s.x += s.vx * dt; s.y += s.vy * dt; }
       this.frontierSparks = this.frontierSparks.filter(s => s.life > 0);
       this.sampleFrontierSparks();
 
       // decorative ribbons (mid-weight trails)
-      if (this.frame % 2 === 0 && this.t > 2.5) {
+      if (this.frame % 2 === 0 && this.opened) {
         for (let t = 0; t < 4; t++) {
           const [bx, by] = BASES[t], a = this.aim[t], n = this.t < 15 ? 6 : this.t < 50 ? 9 : this.t < 200 ? 12 : 3;
           for (let k = 0; k < n; k++) {
@@ -512,7 +605,7 @@
 
       // dense silk-thread particles (GPU ParticleContainer target)
       {
-        const spawnN = this.t < 2.5 ? 0 : this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : this.t < 200 ? 140 : 15;
+        const spawnN = !this.opened ? 0 : this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : this.t < 200 ? 140 : 15;
         for (let t = 0; t < 4; t++) {
           const [bx, by] = BASES[t], a = this.aim[t];
           const toCenter = Math.atan2(G / 2 - by, G / 2 - bx);
@@ -521,7 +614,7 @@
             // ~35% tight beam along aim (team-coloured core), rest a wide fine-hair fan
             const beam = (k % 3 === 0);
             const base = a; // streams follow the turret barrel
-            const spread = beam ? 0.035 : 0.6;
+            const spread = beam ? 0.02 : 0.11; // narrow dense jet
             const ang = base + rand(-spread, spread), sp = rand(7, 18);
             const jx = rand(-4, 4), jy = rand(-4, 4);
             this.pushSilk(beam ? t + 4 : t, bx + jx, by + jy, Math.cos(ang) * sp, Math.sin(ang) * sp, .9 + Math.random() * 1.3);
@@ -571,8 +664,10 @@
   /* ===================== LEFT BOARD (Canvas2D → texture) ===================== */
   function drawIcon(c, i, x, y) {
     c.save(); c.translate(x, y); c.scale(.78, .78); c.strokeStyle = '#bfcbd4'; c.fillStyle = '#bfcbd4'; c.lineWidth = 1.7; c.lineCap = 'round';
-    if (i === 0) { // 风暴: tornado
-      for (let k = 0; k < 4; k++) { c.beginPath(); c.moveTo(-10 + k * 2.5, -7 + k * 4.5); c.lineTo(10 - k * 1.5, -7 + k * 4.5); c.stroke(); }
+    if (i === 0) { // 散弹: shotgun with pellet cone
+      c.beginPath(); c.moveTo(-13, 1); c.lineTo(3, 1); c.lineTo(3, -2); c.lineTo(-13, -2); c.closePath(); c.fill();
+      c.beginPath(); c.moveTo(-9, 1); c.lineTo(-12, 6); c.lineTo(-8, 6); c.lineTo(-6, 1); c.closePath(); c.fill();
+      for (const [dx, dy] of [[7, -6], [9, -1], [7, 4], [12, -4], [12, 2]]) { c.beginPath(); c.arc(dx, dy, 1.3, 0, 7); c.fill(); }
     } else if (i === 1) { // 机枪: rifle
       c.beginPath(); c.moveTo(-13, -1); c.lineTo(12, -1); c.lineTo(12, 1.5); c.lineTo(-2, 1.5); c.lineTo(-5, 6); c.lineTo(-8, 6); c.lineTo(-7, 1.5); c.lineTo(-13, 2); c.closePath(); c.fill();
       c.fillRect(2, 1.5, 2.5, 4); c.fillRect(12, -2.2, 3, 1.2);
@@ -595,9 +690,11 @@
     c.beginPath(); c.moveTo(x, bot); c.lineTo(x, top + 4); c.quadraticCurveTo(x, top, x + 4, top); c.lineTo(x + w - 3, top + 2); c.quadraticCurveTo(x + w, top + 3, x + w, top + 6); c.lineTo(x + w, bot); c.closePath();
     c.fillStyle = g; c.fill(); c.strokeStyle = 'rgba(150,185,205,.75)'; c.lineWidth = 1.3; c.stroke();
   }
-  const LPILLARS = [[0, 12, 428], [42, 24, 433], [116, 26, 443], [209, 13, 456]];
+  const GRAV = 300, PEG_R = 6.5, PASS_V = 960, BUOY_Y0 = 449, BUOY_Y1 = 520;
+  const LPILLARS = [[0, 12, 300], [42, 24, 345], [116, 26, 395], [209, 13, 450]]; // steep steps
   const SLOT_LABEL_X = [27, 93, 176, 582, 668, 732];
-  const IPILLARS = [[0, 12, 918], [137, 23, 928], [290, 23, 934], [448, 23, 934], [601, 23, 928], [748, 12, 918]];
+  const IPILLARS = [[0, 12, 990], [137, 23, 990], [290, 23, 990], [448, 23, 990], [601, 23, 990], [748, 12, 990]]; // flat, short
+  const PHYS_RECTS = [...LPILLARS.flatMap(([x, w, t]) => [[x, t, x + w, 540], [LEFT - x - w, t, LEFT - x, 540]]), ...IPILLARS.map(([x, w, t]) => [x, t, x + w, 1052])];
   function drawLeftTo(c, game) {
     if (!drawLeftTo.cache) {
       const cv = document.createElement('canvas'); cv.width = LEFT; cv.height = H;
@@ -629,7 +726,7 @@
     c.drawImage(drawLeftTo.cache, 0, 0);
     // pegs (drift slowly)
     for (const P of [game.pegs, game.lowerPegs]) for (const q of P) {
-      c.fillStyle = 'rgba(140,150,162,.8)'; c.beginPath(); c.arc(q[0], q[1], 4.6, 0, 7); c.fill();
+      c.fillStyle = 'rgba(140,150,162,.8)'; c.beginPath(); c.arc(q[0], q[1], 6.5, 0, 7); c.fill();
       c.fillStyle = 'rgba(200,208,216,.45)'; c.beginPath(); c.arc(q[0] - 1.2, q[1] - 1.2, 2, 0, 7); c.fill();
     }
     // slot hit tint
@@ -1010,14 +1107,14 @@
         if (len > 1) {
           g.moveTo(p.trail[0][0], p.trail[0][1]);
           for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]);
-          if (p.kind === 2) { const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150); g.stroke({ width: rr * 2, color: team.hex, alpha: 0.72, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * 1.1, color: 0xffffff, alpha: 0.1, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
+          if (p.kind === 2) { const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS; g.stroke({ width: rr * 2, color: team.hex, alpha: 0.72, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * 1.1, color: 0xffffff, alpha: 0.1, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
           else if (p.kind === 3) g.stroke({ width: 2.4, color: team.hex, alpha: 0.65 });
           else if (age > .45 || p.kind === 4) g.stroke({ width: 1.2, color: 0xffffff, alpha: 0.28 });
           else g.stroke({ width: 1.5, color: 0xffffff, alpha: 0.22 });
         }
         if (p.kind === 2) {
           if (bi >= this.ballPool.length) continue;
-          const r = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150), B = this.ballPool[bi++];
+          const r = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS, B = this.ballPool[bi++];
           B.c.visible = true; B.c.x = p.x; B.c.y = p.y;
           B.glow.texture = this.teamGlowTex[p.team]; B.glow.width = B.glow.height = r * 3.4;
           const key = p.team + ':' + (r | 0);
@@ -1041,13 +1138,19 @@
         }
         g.arc(bx, by, w.r, w.a - w.half, w.a + w.half).stroke({ width: 10, color: tm.hex, alpha: .35 });
       }
+      if (game.opening) for (const o of game.opening) {
+        const tm = TEAMS[o.t]; g.moveTo(o.trail[0]?.[0] ?? o.x, o.trail[0]?.[1] ?? o.y); for (const q of o.trail) g.lineTo(q[0], q[1]); g.lineTo(o.x, o.y);
+        g.stroke({ width: 7, color: tm.hex, alpha: .35 }); g.moveTo(o.trail[0]?.[0] ?? o.x, o.trail[0]?.[1] ?? o.y); for (const q of o.trail) g.lineTo(q[0], q[1]); g.lineTo(o.x, o.y); g.stroke({ width: 2, color: 0xffffff, alpha: .95 });
+        g.circle(o.x, o.y, 6).fill({ color: 0xffffff, alpha: 1 }).circle(o.x, o.y, 11).stroke({ width: 3, color: tm.hex, alpha: .9 });
+      }
+      if (game.burst) { const k = 1 - game.burst.life / 2; for (let t = 0; t < 4; t++) g.circle(G / 2, G / 2, 20 + k * (200 + t * 40)).stroke({ width: 6 * (1 - k) + 1, color: TEAMS[t].hex, alpha: .9 * (1 - k) }); g.circle(G / 2, G / 2, 40 * (1 - k) + 6).fill({ color: 0xffffff, alpha: .9 * (1 - k) }); }
       for (const L of game.lasers) {
         const [bx, by] = BASES[L.team], ex = bx + Math.cos(L.a) * 1900, ey = by + Math.sin(L.a) * 1900, al = Math.min(1, L.life);
         g.moveTo(bx, by).lineTo(ex, ey).stroke({ width: 12, color: TEAMS[L.team].hex, alpha: .2 * al });
         g.moveTo(bx, by).lineTo(ex, ey).stroke({ width: 3, color: TEAMS[L.team].hex, alpha: 1 * al }); g.moveTo(bx, by).lineTo(ex, ey).stroke({ width: 1, color: 0xffffff, alpha: .7 * al });
       }
       // main beam per team: coloured energy ribbon from base along aim until it exits own turf + ~reach
-      for (let t = 0; t < 4 && game.t > 2.5; t++) {
+      for (let t = 0; t < 4 && game.opened; t++) {
         const [bx, by] = BASES[t], a = game.aim[t], ca = Math.cos(a), sa = Math.sin(a);
         let L = 0; const maxL = 760;
         while (L < maxL) { const x = bx + ca * L, y = by + sa * L; if (x < 0 || y < 0 || x >= G || y >= G) break; const o = game.grid[((y / S) | 0) * GS + ((x / S) | 0)]; if (o < 4 && o !== t) break; L += 6; }
@@ -1072,24 +1175,24 @@
       for (let t = 0; t < 4; t++) {
         const team = TEAMS[t], [ux, uy] = corner[t];
         const x = AX + G * ux, y = AY + G * uy;
-        const grow = clamp((game.t - .6) / 4.5, 0, 1), r = 20 + 72 * grow * grow * (3 - 2 * grow);
+        const grow = clamp((game.t - .6) / 4.5, 0, 1), r = (20 + 72 * grow * grow * (3 - 2 * grow)) / WS;
         const pulse = Math.sin(game.t * 2.4 + t) * 2.8;
         // outer glow disc
         if (game.flood === t) {
-          const FR = r + 20 + clamp((game.t - 150) / 200, 0, 1) * 190;
+          const FR = r + 20 + clamp((game.t - 150) / 200, 0, 1) * 190 / WS;
           fg.circle(x, y, FR + 30).fill({ color: team.hex, alpha: .12 }); fg.circle(x, y, FR + 12).fill({ color: team.hex, alpha: .22 });
           fg.circle(x, y, FR).fill({ color: team.hex, alpha: .92 });
           for (const k of [.45, .62, .8, .93]) fg.circle(x, y, FR * k + Math.sin(game.t * 2 + k * 9) * 3).stroke({ width: 3, color: team.hi ? ((team.hi[0] << 16) | (team.hi[1] << 8) | team.hi[2]) : 0xffffff, alpha: .8 });
           fg.circle(x, y, FR).stroke({ width: 4, color: 0xffffff, alpha: .75 });
         }
-        g.circle(x, y, r + 14).stroke({ width: 22, color: team.hex, alpha: 0.10 }); g.circle(x, y, r + 6).stroke({ width: 10, color: team.hex, alpha: 0.22 });
+        g.circle(x, y, r + 8).stroke({ width: 13, color: team.hex, alpha: 0.10 }); g.circle(x, y, r + 3.5).stroke({ width: 6, color: team.hex, alpha: 0.22 });
         g.circle(x, y, r + pulse * .4).stroke({ width: 4, color: team.hex, alpha: 1 }); g.circle(x, y, r + pulse * .4).stroke({ width: 1.2, color: 0xffffff, alpha: .7 });
-        g.circle(x, y, r - 8).stroke({ width: 6, color: team.hex, alpha: 0.55 });
+        g.circle(x, y, r - 5).stroke({ width: 3.5, color: team.hex, alpha: 0.55 });
         g.circle(x, y, r - 6).fill({ color: 0x020812, alpha: 0.4 }); g.circle(x, y, r - 6).fill({ color: team.hex, alpha: 0.16 });
         // aim
         const a = game.aim[t];
         // rotating turret: hub + barrel that sticks out past the ring; streams follow this angle
-        const ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca, L0 = 6, L1 = r + 22, bw = 6;
+        const ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca, L0 = 4, L1 = r + 14, bw = 4;
         g.poly([x + ca * L0 + px * bw, y + sa * L0 + py * bw, x + ca * L1 + px * (bw * .7), y + sa * L1 + py * (bw * .7), x + ca * L1 - px * (bw * .7), y + sa * L1 - py * (bw * .7), x + ca * L0 - px * bw, y + sa * L0 - py * bw])
           .fill({ color: team.hex, alpha: .95 }).stroke({ width: 1.5, color: 0xffffff, alpha: .8 });
         g.moveTo(x + ca * L0, y + sa * L0).lineTo(x + ca * L1, y + sa * L1).stroke({ width: 1.6, color: 0xffffff, alpha: .9 });
@@ -1097,19 +1200,19 @@
         g.circle(x, y - 3, 8).fill({ color: 0x07111c, alpha: 1 }).stroke({ width: 2.2, color: team.hex, alpha: 1 });
         g.circle(x, y - 3, 3).fill({ color: 0xffffff, alpha: 1 });
 
-        const texts = this.baseTexts[t]; const ta = clamp((r - 55) / 30, 0, 1); texts.ammo.alpha = texts.sec.alpha = ta; texts.lab.alpha = texts.zero.alpha = 1 - ta; texts.lab.x = x; texts.lab.y = y - r - 4; texts.zero.x = x + r + 6; texts.zero.y = y;
+        const texts = this.baseTexts[t]; const ta = clamp((r * WS - 55) / 30, 0, 1), U = 1 / WS; texts.ammo.alpha = texts.sec.alpha = ta; texts.lab.alpha = texts.zero.alpha = 1 - ta; texts.lab.x = x; texts.lab.y = y - r - 4; texts.zero.x = x + r + 6; texts.zero.y = y;
         if (ta < 1) { g.circle(x, y, r).fill({ color: team.hex, alpha: .12 * (1 - ta) }); }
         // ref layout: [shield] 25.86M  /  hub  /  [gun box] 241,410
-        texts.ammo.style.fontSize = 21; texts.ammo.text = fmt(game.ammo[t]); texts.ammo.x = x - 22; texts.ammo.y = y - 26; texts.ammo.style.fill = 0xffffff;
-        const sx = x - 42, sy = y - 26; // shield icon
-        if (ta > .3) g.poly([sx, sy - 9, sx + 8, sy - 6, sx + 7, sy + 3, sx, sy + 9, sx - 7, sy + 3, sx - 8, sy - 6]).stroke({ width: 1.6, color: 0xffffff, alpha: .85 });
-        if (ta > .3) g.poly([sx, sy - 4, sx + 4, sy - 2.5, sx + 3.5, sy + 2, sx, sy + 4.5, sx - 3.5, sy + 2, sx - 4, sy - 2.5]).fill({ color: team.hex, alpha: 1 });
+        texts.ammo.style.fontSize = 13; texts.ammo.text = fmt(game.ammo[t]); texts.ammo.x = x - 22 * U; texts.ammo.y = y - 26 * U; texts.ammo.style.fill = 0xffffff;
+        const sx = x - 42 * U, sy = y - 26 * U; // shield icon
+        if (ta > .3) g.poly([sx, sy - 9, sx + 8, sy - 6, sx + 7, sy + 3, sx, sy + 9, sx - 7, sy + 3, sx - 8, sy - 6].map((v, k) => (k & 1 ? sy : sx) + (v - (k & 1 ? sy : sx)) * U)).stroke({ width: 1.6, color: 0xffffff, alpha: .85 });
+        if (ta > .3) g.poly([sx, sy - 4, sx + 4, sy - 2.5, sx + 3.5, sy + 2, sx, sy + 4.5, sx - 3.5, sy + 2, sx - 4, sy - 2.5].map((v, k) => (k & 1 ? sy : sx) + (v - (k & 1 ? sy : sx)) * U)).fill({ color: team.hex, alpha: 1 });
         const secondary = Math.max(1000, Math.round(120000 + game.share[t] * 1.2e6 + game.t * 900));
-        if (ta > .3) g.roundRect(x - 72, y + 9, 144, 26, 4).fill({ color: 0x02060c, alpha: .55 }).stroke({ width: 1, color: 0xc8e6fa, alpha: .25 });
-        const gx2 = x - 56, gy2 = y + 22; // gun icon
-        if (ta > .3) g.rect(gx2 - 10, gy2 - 1.5, 20, 3).fill({ color: 0xffffff, alpha: .8 }); g.rect(gx2 - 4, gy2 + 1, 3, 4).fill({ color: 0xffffff, alpha: .8 });
-        texts.sec.style.fontSize = 17; texts.sec.text = fmtScore(secondary); texts.sec.style.fill = team.hex === 0xffa514 ? 0xffe0b0 : 0xffffff;
-        texts.sec.x = x + 8; texts.sec.y = y + 22;
+        if (ta > .3) g.roundRect(x - 72 * U, y + 9 * U, 144 * U, 26 * U, 3).fill({ color: 0x02060c, alpha: .55 }).stroke({ width: 1, color: 0xc8e6fa, alpha: .25 });
+        const gx2 = x - 56 * U, gy2 = y + 22 * U; // gun icon
+        if (ta > .3) g.rect(gx2 - 10 * U, gy2 - 1, 20 * U, 2).fill({ color: 0xffffff, alpha: .8 }); if (ta > .3) g.rect(gx2 - 4 * U, gy2 + 1, 2, 3).fill({ color: 0xffffff, alpha: .8 });
+        texts.sec.style.fontSize = 11; texts.sec.text = fmtScore(secondary); texts.sec.style.fill = team.hex === 0xffa514 ? 0xffe0b0 : 0xffffff;
+        texts.sec.x = x + 8 * U; texts.sec.y = y + 22 * U;
       }
     }
 
