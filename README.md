@@ -116,3 +116,15 @@ python3 marble_war_v3.py --teams 8 --duration 480 --episode 3 --out ep3.mp4 --pr
 参数：`--teams`（4-8）、`--seeds` / `--seed-start`、`--seed`、`--duration`（秒，默认 600）、`--episode`、`--jobs`、`--screen-only`、`--no-trailer`、`--out`、`--preview`、`--trailer`。
 
 输出：`marble_v3_sample.mp4`（1920x1080 30fps H.264 + AAC）、`marble_v3_trailer.mp4`（约 60 秒高光）、`marble_v3_preview_XX_时间.png`（10 张时间轴关键帧）+ `marble_v3_preview_end.png`。
+
+## marble_war_v5_demo.py —— 粒子领地大战 v5（约 10s 机制演示）
+
+独立于 v3 的短演示：共享双层 Plinko（**Pymunk** 斜面/球碰撞）+ 传送叠倍率 + 四道具；右侧四角单管、护盾/子弹数字衰减、中心 Boss「来袭」与 8×奖池分倍率。**无阶段系统、无等级、无解说语音。**
+
+```bash
+pip install --break-system-packages pymunk
+python3 marble_war_v5_demo.py   # -> marble_v5_demo.mp4 + marble_v5_demo_preview_*.png
+```
+
+详见 `marble_v5_demo_notes.md` 与 `v5_整改需求.md`。
+
