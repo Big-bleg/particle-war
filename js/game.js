@@ -1,8 +1,12 @@
 (() => {
   'use strict';
 
-  const W = 1920, H = 1080, LEFT = 740, G = 1000, AX = 860, AY = 40, GS = 168, S = G / GS;
-  const PX = 12, PW = 716, BAND = 420, ITEMY = 918, ITEMH = 140;
+  const W = 1920, H = 1080, LEFT = 760, G = 1000, AX = 860, AY = 40, GS = 168, S = G / GS;
+  const PX = 0, PW = 760, BAND = 430, ITEMY = 928, ITEMH = 124;
+  // 1:1 ref layout (measured from douyin_detail frames, 1920x1080 space)
+  const LEDGE_TOP = 430, LEDGE_BOT = 540, LGROUP = [[0, 222], [538, 760]], GAP = [222, 538];
+  const SLOT_X = [[2, 76, 0], [76, 148, 1], [148, 222, 2], [538, 612, 3], [612, 684, 4], [684, 758, 5]]; // x0,x1,slot
+  const ITEM_X = [0, 138, 290, 448, 601, 760];
   const MULT = [8, 4, 2, 2, 4, 8], NAMES = ['风暴', '机枪', '护盾', '大球', '狙击'];
   const TEAMS = [
     { name: '红队', c: [255, 20, 70], hi: [255, 90, 130], glow: [255, 40, 90], edge: [255, 200, 220], hex: 0xff1446 },
@@ -84,7 +88,7 @@
       this.ammo = [25.06e6, 25.02e6, 24.84e6, 25.12e6];
       this.score = [198000, 296000, 220000, 299000]; this.shield = [1, 1, 1, 1];
       this.items = [0, 0, 0, 0, 0]; this.aiItems = Array.from({ length: 4 }, () => [0, 0, 0, 0, 0]);
-      this.hit = [0, 0, 0, 0, 0, 0];
+      this.hit = [0, 0, 0, 0, 0, 0]; this.slotFlash = []; this.itemFlash = [];
       this.marbles = []; this.nextMarble = [.15, .35, .55, .8]; this.cool = [0, 0, 0, 0];
       this.aim = BASES.map(([x, y]) => Math.atan2(G / 2 - y, G / 2 - x));
       this.playerAim = this.aim[player];
@@ -93,7 +97,7 @@
       // asymmetric momentum: each team has a drifting fire-power multiplier
       this.power = [0, 1, 2, 3].map(() => rand(.8, 1.25)); this.powerClock = 0;
       this.sweepPh = [0, 1, 2, 3].map(() => rand(0, 6.28)); this.sweepSp = [0, 1, 2, 3].map(() => rand(.15, .4));
-      this.events = [];
+      this.events = []; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
       this.ribbons = []; this.silk = new Float32Array(SILK_CAP * 7); this.silkCount = 0;
       this.stars = Array.from({ length: 220 }, () => [rand(0, G), rand(0, G), rand(.2, 1), rand(.5, 2.2)]);
       this.frame = 0; this.dirty = true; this.terrainAge = 0;
@@ -101,33 +105,24 @@
       this.fpsEMA = 60; this._lastNow = 0;
       this.seedBases(17);
       for (let t = 0; t < 4; t++) {
-        this.marble(t); this.marble(t); this.marble(t);
         for (let k = 0; k < 24; k++) this.spawn(t, 0, 3);
       }
+      for (let i = 0; i < 16; i++) { this.marble(i % 4); const m = this.marbles[this.marbles.length - 1]; m.x = 40 + i * 18; m.y = 24; m.wait = .8 + i * .15; m.v = 32; m.r = 8; m.path = [[m.x, m.y]]; }
       // seed silk immediately so t~10s looks dense
       for (let i = 0; i < 4000; i++) this.pushSilkSeed();
     }
     id(x, y) { return y * GS + x; }
-    makePegs() {
-      const a = []; const cols = 9, rows = 7, ox = 38, oy = 72, dx = 78, dy = 46;
-      for (let row = 0; row < rows; row++) {
-        const x0 = ox + (row % 2 ? dx * .5 : 0);
-        for (let col = 0; col < cols; col++) {
-          const x = x0 + col * dx; if (x > LEFT - 24) continue; a.push([x, oy + row * dy]);
-        }
+    scatter(n, y0, y1) {
+      const a = [];
+      let tries = 0;
+      while (a.length < n && tries++ < 4000) {
+        const x = rand(40, LEFT - 40), y = rand(y0, y1);
+        if (a.every(q => (q[0] - x) ** 2 + (q[1] - y) ** 2 > 95 * 95)) a.push([x, y, rand(-3, 3), rand(-2, 2), y0, y1]);
       }
       return a;
     }
-    makeLowerPegs() {
-      const a = []; const dx = 80, dy = 52, ox = 42, oy = 560;
-      for (let row = 0; row < 6; row++) {
-        const x0 = ox + (row % 2 ? dx * .5 : 0);
-        for (let col = 0; col < 9; col++) {
-          const x = x0 + col * dx; if (x > LEFT - 24) continue; a.push([x, oy + row * dy]);
-        }
-      }
-      return a;
-    }
+    makePegs() { return this.scatter(14, 90, 400); }
+    makeLowerPegs() { return this.scatter(13, 575, 870); }
     // cellular smoothing: rounds bullet spikes into foamy blobs/tongues (no radial auto-expand)
     smoothFront() {
       const g = this.grid, out = g.slice(), c = [0, 0, 0, 0, 0];
@@ -171,18 +166,17 @@
       this.dirty = true;
     }
     marble(team) {
-      const base = 1800 + this.t * 720;
-      const mul = pick([1, 1, 2, 2, 4, 8, 16, 32, 64, 128, 256]);
-      const v = base * mul;
-      this.marbles.push({ team, x: rand(40, LEFT - 40), y: 18, vx: rand(-.7, .7), vy: rand(.55, 1.5), v, r: v > 1e6 ? 18 : v > 1e5 ? 14 : v > 2e4 ? 11 : 7, hit: -1, trail: [] });
+      // values double: early 16–256, grows to K / M (ref: 64 → 131K → 1M)
+      const k = Math.min(20, Math.floor(rand(4, 8) + Math.min(16, this.t / 5) * rand(.6, 1)));
+      const v = Math.pow(2, k);
+      const ang = Math.PI / 2 + rand(-.75, .75), sp = rand(150, 240);
+      const r = v >= 1e6 ? 25 : v >= 1e5 ? 20 : v >= 5e4 ? 18 : v >= 2e4 ? 16.5 : v >= 1e4 ? 15 : v >= 1e3 ? 13 : v >= 100 ? 10 : 8.5;
+      this.marbles.push({ team, x: rand(60, LEFT - 60), y: 22, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, v, r, hit: -1, trail: [], path: [[0, 0]], zone: 0 }); { const mm = this.marbles[this.marbles.length - 1]; mm.path[0] = [mm.x, mm.y]; }
     }
     award(team, slot, value) {
       const v = value * MULT[slot];
       this.score[team] += v; this.ammo[team] = Math.min(999e6, this.ammo[team] + v * .004 * (1 + this.t / 90));
-      const type = slot % 5;
-      if (team === this.player) this.items[type] = Math.min(99, this.items[type] + 1);
-      else this.aiItems[team][type] = Math.min(99, this.aiItems[team][type] + 1);
-      if (type === 2) this.shield[team] = Math.min(1, this.shield[team] + .08);
+      this.slotFlash[slot] = { team, life: 1 };
     }
     spawn(team, kind = 0, count = null, angle = null) {
       if (this.ammo[team] < 800 || this.shots.length >= MAX_SHOTS) return;
@@ -193,7 +187,7 @@
       if (kind === 2) n = 1; if (kind === 3) n = count ?? 7;
       const speed = kind === 2 ? 2.2 : kind === 3 ? 15 : kind === 4 ? 8.2 : kind === 1 ? 9.5 : 7.4;
       const spread = kind === 2 ? 0 : kind === 3 ? .02 : kind === 4 ? .07 : kind === 1 ? .07 : .075;
-      const cost = kind === 2 ? 220e3 : kind === 3 ? 28e3 : Math.max(400, n * 550);
+      const cost = kind === 2 ? 220e3 : kind === 3 ? 28e3 : Math.max(200, n * 260);
       this.ammo[team] = Math.max(0, this.ammo[team] - cost);
       for (let k = 0; k < n && this.shots.length < MAX_SHOTS; k++) {
         const a = baseAng + (k - (n - 1) / 2) * spread + rand(-.02, .02);
@@ -215,7 +209,7 @@
       if (i === 1) { for (let k = 0; k < 14; k++) this.spawn(team, 0, 3, a + rand(-.28, .28)); }
       if (i === 2) { this.shield[team] = 1; this.sparks.push({ x: BASES[team][0], y: BASES[team][1], team, life: 1, burst: true }); }
       if (i === 3 && this.shots.filter(q => q.kind === 2).length >= 3) { bag[i]++; return false; }
-      if (i === 3) { this.ammo[team] += 2e5; this.spawn(team, 2, 1, a); const s2 = this.shots[this.shots.length - 1]; if (s2 && s2.kind === 2) s2.value = Math.max(s2.value, 3e6 + this.t * 2.5e5 * rand(.6, 1.6)); this.events.push({ t: this.t, team, kind: 'bigball' }); }
+      if (i === 3) { this.ammo[team] += 2e5; this.spawn(team, 2, 1, a); const s2 = this.shots[this.shots.length - 1]; if (s2 && s2.kind === 2) s2.value = rand(3e5, 1.2e6) * (1 + this.t / 500); this.events.push({ t: this.t, team, kind: 'bigball' }); }
       if (i === 4) this.spawn(team, 3, 6, a);
       return true;
     }
@@ -242,7 +236,7 @@
           return true;
         }
       }
-      const radius = p.kind === 2 ? 42 : p.kind === 3 ? 14 : p.kind === 1 ? 8 : p.kind === 4 ? 5.5 : 4.5;
+      const radius = p.kind === 2 ? 42 : p.kind === 3 ? 14 : p.kind === 1 ? 8 : p.kind === 4 ? 6 : 5.5;
       this.paint(p.x, p.y, p.team, radius * (1 + Math.min(1.2, this.t / 200)));
       if (Math.random() < .35) this.sparks.push({ x: p.x, y: p.y, team: p.team, life: .55 + Math.random() * .3 });
       if (p.kind === 2) { p.value *= .995; p.life++; return p.life > 240 || p.value < 700e3; }
@@ -267,33 +261,60 @@
       const dist = rand(20, 380);
       this.pushSilk(t, bx + Math.cos(a) * dist, by + Math.sin(a) * dist, Math.cos(a) * sp, Math.sin(a) * sp, .4 + Math.random() * .9);
     }
+    giveItem(team, type) {
+      if (team === this.player) this.items[type] = Math.min(99, this.items[type] + 1);
+      else this.aiItems[team][type] = Math.min(99, this.aiItems[team][type] + 1);
+      if (type === 2) this.shield[team] = Math.min(1, this.shield[team] + .08);
+      this.itemFlash[type] = { team, life: 1 };
+    }
     tickMarbles(dt) {
       for (let t = 0; t < 4; t++) {
         this.nextMarble[t] -= dt;
-        if (this.nextMarble[t] <= 0) {
-          this.marble(t);
-          const pace = clamp(2.1 - this.t / 420, .42, 2.1);
-          this.nextMarble[t] = pace * rand(.55, 1.15);
-          if (this.t > 40 && Math.random() < .3) this.marble(t);
-        }
+        if (this.nextMarble[t] <= 0 && this.marbles.length < 14) { this.marble(t); this.nextMarble[t] = rand(1.1, 2.6) * clamp(1.4 - this.t / 600, .6, 1.4); }
       }
+      if (this.marbles.length > 10) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
+      for (const P of [this.pegs, this.lowerPegs]) for (const q of P) {
+        q[0] += q[2] * dt; q[1] += q[3] * dt;
+        if (q[0] < 40 || q[0] > LEFT - 40) q[2] *= -1;
+        if (q[1] < q[4] || q[1] > q[5]) q[3] *= -1;
+      }
+      for (const f of this.slotFlash) if (f) f.life -= dt * 1.5;
+      for (const f of this.itemFlash) if (f) f.life -= dt * 1.5;
       const live = [];
       for (const m of this.marbles) {
-        m.trail.push([m.x, m.y]); if (m.trail.length > 10) m.trail.shift();
-        m.vy += 17 * dt; m.x += m.vx * 60 * dt; m.y += m.vy * 60 * dt;
-        for (const [x, y] of this.pegs) {
-          const dx = m.x - x, dy = m.y - y, d = dx * dx + dy * dy;
-          if (d < 100) { const q = Math.sqrt(d) || 1; m.vx = (dx / q) * 3; m.vy = Math.abs(dy / q) * 2.8 + 1.4; m.x += dx / q * 5; m.y += dy / q * 5; }
+        if (m.wait > 0) { m.wait -= dt; live.push(m); continue; }
+        m.trail.push([m.x, m.y]); if (m.trail.length > 9) m.trail.shift();
+        m.vy += 55 * dt;
+        const spd = Math.hypot(m.vx, m.vy); if (spd > 320) { m.vx *= 320 / spd; m.vy *= 320 / spd; }
+        m.x += m.vx * dt; m.y += m.vy * dt;
+        const pr = m.zone ? this.lowerPegs : this.pegs;
+        for (const q of pr) {
+          const dx = m.x - q[0], dy = m.y - q[1], rr = m.r + 6;
+          if (dx * dx + dy * dy < rr * rr) {
+            const d = Math.hypot(dx, dy) || 1, nx = dx / d, ny = dy / d, dot = m.vx * nx + m.vy * ny;
+            if (dot < 0) { m.vx -= 1.9 * dot * nx; m.vy -= 1.9 * dot * ny; }
+            m.x = q[0] + nx * rr; m.y = q[1] + ny * rr;
+            m.path.push([m.x, m.y]);
+          }
         }
-        if (m.x < 8) { m.x = 8; m.vx = Math.abs(m.vx); } if (m.x > LEFT - 8) { m.x = LEFT - 8; m.vx = -Math.abs(m.vx); }
-        if (m.hit < 0 && m.y > BAND - 4) {
-          const slot = clamp(Math.floor((m.x - PX) / PW * 6), 0, 5);
-          m.hit = slot; this.hit[slot]++; this.award(m.team, slot, m.v);
+        if (m.x < m.r + 4) { m.x = m.r + 4; m.vx = Math.abs(m.vx); m.path.push([m.x, m.y]); }
+        if (m.x > LEFT - m.r - 4) { m.x = LEFT - m.r - 4; m.vx = -Math.abs(m.vx); m.path.push([m.x, m.y]); }
+        if (!m.zone && m.y > LEDGE_TOP + 20) {
+          const inGroup = m.x < GAP[0] || m.x > GAP[1];
+          if (inGroup) {
+            const sl = SLOT_X.find(z => m.x >= z[0] && m.x < z[1]); const slot = sl ? sl[2] : (m.x < GAP[0] ? 2 : 3);
+            this.hit[slot]++; this.award(m.team, slot, m.v); continue;
+          }
+          m.zone = 1; m.path = [];
         }
-        if (m.y > ITEMY + 20) continue;
+        if (m.zone && m.y > ITEMY + 30) {
+          let it = 0; for (let k = 0; k < 5; k++) if (m.x >= ITEM_X[k]) it = k;
+          this.giveItem(m.team, it); continue;
+        }
+        if (m.path.length > 2) m.path.shift();
         live.push(m);
       }
-      this.marbles = live.slice(-130);
+      this.marbles = live.slice(-80);
     }
     sampleFrontierSparks() {
       if (this.frame % 3 !== 0) return;
@@ -325,12 +346,33 @@
         if (t !== this.player || this.autoAim) {
           // centre-focused opening, then a widening sweep across own quadrant (ref: beams meet centre at 0:10)
           const [bx, by] = BASES[t], c = Math.atan2(G / 2 - by, G / 2 - bx);
-          const amp = this.t < 12 ? 0 : Math.min(.68, (this.t - 12) * .025);
-          this.aim[t] = c + amp * Math.sin((this.t - 12) * this.sweepSp[t] + this.sweepPh[t]);
+          if (this.t < 12) { this.aim[t] = c; this.lock[t] = null; }
+          else {
+            // threat lock: normal bullets within 2x shield radius, big balls within half the map
+            let best = null, bd = 1e9;
+            if ((this.frame + t) % 3 === 0) {
+              for (const q of this.shots) {
+                if (q.team === t) continue;
+                const d = Math.hypot(q.x - bx, q.y - by), lim = q.kind === 2 ? G * .5 : 200;
+                if (d < lim && d < bd) { bd = d; best = q; }
+              }
+              this.lock[t] = best;
+            }
+            const L = this.lock[t];
+            if (L && L.x > -20) {
+              const want = Math.atan2(L.y - by, L.x - bx);
+              let da = ((want - this.aim[t] + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+              this.aim[t] += clamp(da, -3.2 * dt, 3.2 * dt);
+            } else {
+              // free continuous rotation (spin), speed/direction per team
+              this.aim[t] += this.spin[t] * dt;
+            }
+            this.aim[t] = ((this.aim[t] + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+          }
         }
         if (t === this.player && this.autoAim) this.playerAim = this.aim[t];
         this.cool[t] -= dt;
-        const rate = clamp(.16 - this.t * .00015, .04, .16) / this.power[t];
+        const rate = clamp(.11 - this.t * .0001, .04, .11) / this.power[t];
         if (t === this.player) {
           if (!this.autoAim) this.aim[t] = this.playerAim;
           if (this.firing && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 20 ? 10 : 14); this.cool[t] = .04; }
@@ -349,7 +391,7 @@
         this.powerClock = 0;
         { const lo = this.t < 90 ? .75 : .35, hi = this.t < 90 ? 1.3 : 1.9; for (let t = 0; t < 4; t++) this.power[t] = clamp(this.power[t] * rand(.8, 1.25), lo, hi); }
         // leader snowball after 90s: the top team gets a boost (ref: one team floods)
-        if (this.t > 90) { const lead = this.share.indexOf(Math.max(...this.share)); this.power[lead] = Math.min(2.2, this.power[lead] * 1.15); if (Math.random() < .5) { const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[Math.random() < .5 ? 0 : 3]++; } }
+        if (this.t > 90) { const lead = this.share.indexOf(Math.max(...this.share)); this.power[lead] = Math.min(1.6, this.power[lead] * 1.05); const last = this.share.indexOf(Math.min(...this.share)); this.power[last] = Math.min(1.9, this.power[last] * 1.2); if (Math.random() < .5) { const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[Math.random() < .5 ? 0 : 3]++; } }
       }
       this.heatClock += dt;
       if (this.heatClock > .25) {
@@ -360,12 +402,12 @@
       if (this.t > 150) {
         const lead = this.share.indexOf(Math.max(...this.share));
         this.flood = lead;
-        if (this.waves.filter(w => w.team === lead).length < 2 && this.t - (this.lastStorm[lead] || -99) > 2.2) {
+        if (!this.waves.some(w => w.team === lead) && this.t - (this.lastStorm[lead] || -99) > 9) {
           this.lastStorm[lead] = this.t;
           const [bx, by] = BASES[lead];
-          this.waves.push({ team: lead, r: 90, a: Math.atan2(G / 2 - by, G / 2 - bx) + rand(-.25, .25), half: 1.25, sp: 170, life: 0, big: true });
+          this.waves.push({ team: lead, r: 90, a: Math.atan2(G / 2 - by, G / 2 - bx) + rand(-.25, .25), half: .9, sp: 170, life: 0, big: true });
         }
-        if (Math.random() < dt * .15 && this.shots.filter(q => q.kind === 2).length < 3) { const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
+        if (Math.random() < dt * (this.t > 240 ? .3 : .1) && this.shots.filter(q => q.kind === 2).length < 3) { const lead = [0, 1, 2, 3][(Math.random() * 4) | 0]; const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
       } else this.flood = -1;
       // storm sweep waves: expanding arc that floods cells (ignores shields beyond base radius)
       for (const w of this.waves) {
@@ -379,13 +421,13 @@
           }
         }
       }
-      this.waves = this.waves.filter(w => w.r < (w.big ? 1400 : 620 + this.t * 2) && w.life < 8);
+      this.waves = this.waves.filter(w => w.r < (w.big ? 820 : 600) && w.life < 8);
       this.caClock = (this.caClock || 0) + dt;
       if (this.caClock > .5) { this.caClock = 0; this.smoothFront(); }
 
       const active = [], trailMax = this.t > 80 ? 22 : this.t > 25 ? 16 : 12;
       for (const p of this.shots) {
-        p.trail.push([p.x, p.y]); if (p.trail.length > trailMax) p.trail.shift();
+        p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 140 : trailMax)) p.trail.shift();
         p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt;
         if (p.x < -20 || p.y < -20 || p.x > G + 20 || p.y > G + 20) continue;
         if (!this.hitShot(p)) active.push(p);
@@ -431,7 +473,7 @@
             // mostly center-seeking tight cone (Douyin silk beams), some aim weave
             // ~35% tight beam along aim (team-coloured core), rest a wide fine-hair fan
             const beam = (k % 3 === 0);
-            const base = beam ? a : (k % 2 ? a : toCenter);
+            const base = a; // streams follow the turret barrel
             const spread = beam ? 0.035 : 0.6;
             const ang = base + rand(-spread, spread), sp = rand(7, 18);
             const jx = rand(-4, 4), jy = rand(-4, 4);
@@ -472,90 +514,125 @@
       for (let t = 0; t < 4; t++) {
         this.score[t] = Math.max(0, this.score[t] + dt * (12000 + this.share[t] * 60000));
         this.level[t] = Math.min(99, Math.floor(this.t / 30));
-        this.ammo[t] += dt * (3000 + this.t * 60) * this.power[t];
+        this.ammo[t] += dt * (3000 + this.t * 60) * this.power[t] * (this.ammo[t] < 3e6 ? 12 : 1);
       }
       if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
-      else if (this.share.some(v => v > .9 && this.t > 160)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
+      else if (this.share.some(v => v > .97 && this.t > 700)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
     }
   }
 
   /* ===================== LEFT BOARD (Canvas2D → texture) ===================== */
+  function drawIcon(c, i, x, y) {
+    c.save(); c.translate(x, y); c.strokeStyle = '#e8f3fb'; c.fillStyle = '#e8f3fb'; c.lineWidth = 1.6; c.lineCap = 'round';
+    if (i === 0) { // 风暴: tornado
+      for (let k = 0; k < 4; k++) { c.beginPath(); c.moveTo(-10 + k * 2.5, -7 + k * 4.5); c.lineTo(10 - k * 1.5, -7 + k * 4.5); c.stroke(); }
+    } else if (i === 1) { // 机枪: rifle
+      c.beginPath(); c.moveTo(-13, -1); c.lineTo(12, -1); c.lineTo(12, 1.5); c.lineTo(-2, 1.5); c.lineTo(-5, 6); c.lineTo(-8, 6); c.lineTo(-7, 1.5); c.lineTo(-13, 2); c.closePath(); c.fill();
+      c.fillRect(2, 1.5, 2.5, 4); c.fillRect(12, -2.2, 3, 1.2);
+    } else if (i === 2) { // 护盾
+      c.beginPath(); c.moveTo(0, -8); c.lineTo(7, -5); c.lineTo(6, 3); c.lineTo(0, 8); c.lineTo(-6, 3); c.lineTo(-7, -5); c.closePath(); c.stroke();
+      c.beginPath(); c.moveTo(0, -4); c.lineTo(3.5, -2.5); c.lineTo(3, 2); c.lineTo(0, 4.5); c.lineTo(-3, 2); c.lineTo(-3.5, -2.5); c.closePath(); c.fill();
+    } else if (i === 3) { // 大球: comet ball
+      c.beginPath(); c.arc(5, 0, 5, 0, 7); c.fill();
+      c.globalAlpha = .7; for (let k = 0; k < 3; k++) { c.beginPath(); c.moveTo(1, -3 + k * 3); c.lineTo(-11 + k, -4 + k * 3.5); c.stroke(); }
+    } else { // 狙击: scope
+      c.beginPath(); c.arc(0, 0, 6.5, 0, 7); c.stroke();
+      c.beginPath(); c.moveTo(-11, 0); c.lineTo(11, 0); c.moveTo(0, -9); c.lineTo(0, 9); c.stroke();
+      c.beginPath(); c.arc(0, 0, 1.6, 0, 7); c.fill();
+    }
+    c.restore();
+  }
+  function pillar(c, x, w, top, bot) {
+    const g = c.createLinearGradient(x, 0, x + w, 0);
+    g.addColorStop(0, '#1b3346'); g.addColorStop(.5, '#24425a'); g.addColorStop(1, '#122435');
+    c.beginPath(); c.moveTo(x, bot); c.lineTo(x, top + 4); c.quadraticCurveTo(x, top, x + 4, top); c.lineTo(x + w - 3, top + 2); c.quadraticCurveTo(x + w, top + 3, x + w, top + 6); c.lineTo(x + w, bot); c.closePath();
+    c.fillStyle = g; c.fill(); c.strokeStyle = 'rgba(150,185,205,.75)'; c.lineWidth = 1.3; c.stroke();
+  }
+  const LPILLARS = [[0, 12, 428], [42, 24, 433], [116, 26, 443], [209, 13, 456]];
+  const SLOT_LABEL_X = [27, 93, 176, 582, 668, 732];
+  const IPILLARS = [[0, 12, 918], [137, 23, 928], [290, 23, 934], [448, 23, 934], [601, 23, 928], [748, 12, 918]];
   function drawLeftTo(c, game) {
     if (!drawLeftTo.cache) {
       const cv = document.createElement('canvas'); cv.width = LEFT; cv.height = H;
-      (function (c, game) {
-    const bg = c.createLinearGradient(0, 0, LEFT, 0);
-    bg.addColorStop(0, '#061422'); bg.addColorStop(.5, '#051321'); bg.addColorStop(1, '#040f1a');
-    c.fillStyle = bg; c.fillRect(0, 0, LEFT, H);
-    c.strokeStyle = '#2a4558'; c.lineWidth = 2; c.strokeRect(1, 1, LEFT - 2, H - 2);
-    c.strokeStyle = 'rgba(120,180,210,.05)'; c.lineWidth = 1;
-    for (let x = 0; x < LEFT; x += 180) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke(); }
-    for (let y = 160; y < H; y += 180) { c.beginPath(); c.moveTo(0, y); c.lineTo(LEFT, y); c.stroke(); }
-    c.save(); c.setLineDash([8, 10]); c.strokeStyle = 'rgba(100,190,210,.22)'; c.beginPath(); c.moveTo(0, 48); c.lineTo(LEFT, 48); c.stroke(); c.restore();
-    const peg = (x, y) => {
-      const g = c.createRadialGradient(x - 1.2, y - 1.2, .5, x, y, 5.5);
-      g.addColorStop(0, '#fff'); g.addColorStop(.45, '#c5d0dc'); g.addColorStop(1, 'rgba(120,150,175,.35)');
-      c.fillStyle = g; c.beginPath(); c.arc(x, y, 4.8, 0, Math.PI * 2); c.fill();
-    };
-    for (const [px, py] of game.pegs) peg(px, py);
-    for (const [px, py] of game.lowerPegs) peg(px, py);
-    const glow = c.createRadialGradient(LEFT / 2, BAND + 40, 6, LEFT / 2, BAND + 40, 200);
-    glow.addColorStop(0, 'rgba(40,210,230,.22)'); glow.addColorStop(.5, 'rgba(20,100,140,.08)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
-    c.fillStyle = glow; c.fillRect(0, BAND - 40, LEFT, 200);
-    c.strokeStyle = 'rgba(80,220,235,.35)'; c.lineWidth = 1.5;
-    for (let x = 240; x < 520; x += 55) {
-      c.beginPath(); c.moveTo(x, BAND + 78); c.lineTo(x, BAND + 28); c.lineTo(x - 5, BAND + 38);
-      c.moveTo(x, BAND + 28); c.lineTo(x + 5, BAND + 38); c.stroke();
-    }
-      })(cv.getContext('2d'), game);
+      const b = cv.getContext('2d');
+      const bg = b.createRadialGradient(LEFT * .5, H * .45, 50, LEFT * .5, H * .45, 760);
+      bg.addColorStop(0, '#0c1826'); bg.addColorStop(1, '#060e18');
+      b.fillStyle = bg; b.fillRect(0, 0, LEFT, H);
+      b.strokeStyle = 'rgba(120,160,190,.07)'; b.lineWidth = 1;
+      for (let x = 200; x < LEFT; x += 200) { b.beginPath(); b.moveTo(x + .5, 0); b.lineTo(x + .5, H); b.stroke(); }
+      for (let y = 200; y < H; y += 200) { b.beginPath(); b.moveTo(0, y + .5); b.lineTo(LEFT, y + .5); b.stroke(); }
+      b.save(); b.setLineDash([6, 6]); b.strokeStyle = 'rgba(150,170,190,.35)'; b.beginPath(); b.moveTo(0, 50.5); b.lineTo(LEFT, 50.5); b.stroke(); b.restore();
+      // centre lift band + arrows
+      const gl = b.createLinearGradient(0, 455, 0, 520); gl.addColorStop(0, 'rgba(40,150,170,0)'); gl.addColorStop(.5, 'rgba(50,170,190,.22)'); gl.addColorStop(1, 'rgba(40,150,170,0)');
+      b.fillStyle = gl; b.fillRect(GAP[0], 455, GAP[1] - GAP[0], 65);
+      const cg = b.createRadialGradient(380, 487, 5, 380, 487, 120); cg.addColorStop(0, 'rgba(90,210,230,.25)'); cg.addColorStop(1, 'rgba(0,0,0,0)'); b.fillStyle = cg; b.fillRect(260, 440, 240, 95);
+      b.strokeStyle = 'rgba(110,200,215,.55)'; b.lineWidth = 1.4;
+      for (const ax of [253, 316, 380, 443, 506]) for (const [y0, y1] of [[485, 463], [512, 490]]) {
+        b.beginPath(); b.moveTo(ax, y0); b.lineTo(ax, y1); b.moveTo(ax - 3.5, y1 + 5); b.lineTo(ax, y1); b.lineTo(ax + 3.5, y1 + 5); b.stroke();
+      }
+      // ledge groups
+      for (const [g0, g1] of LGROUP) { b.fillStyle = 'rgba(14,30,46,.55)'; b.fillRect(g0, 455, g1 - g0, 85); b.strokeStyle = 'rgba(150,185,205,.7)'; b.lineWidth = 1.3; b.beginPath(); b.moveTo(g0, 540.5); b.lineTo(g1, 540.5); b.stroke(); }
+      // item area
+      const ig = b.createLinearGradient(0, 925, 0, 1052); ig.addColorStop(0, 'rgba(20,40,58,.15)'); ig.addColorStop(1, 'rgba(24,48,68,.55)');
+      b.fillStyle = ig; b.fillRect(0, 925, LEFT, 127);
+      b.strokeStyle = 'rgba(150,185,205,.7)'; b.beginPath(); b.moveTo(0, 1052.5); b.lineTo(LEFT, 1052.5); b.stroke();
+      b.strokeStyle = 'rgba(120,160,185,.55)'; b.lineWidth = 1; b.strokeRect(.5, .5, LEFT - 1, H - 1);
       drawLeftTo.cache = cv;
     }
     c.drawImage(drawLeftTo.cache, 0, 0);
-    const sw = PW / 6;
-    for (let i = 0; i < 6; i++) {
-      const x = PX + i * sw;
-      const drop = i % 3 === 0 ? 38 : i % 3 === 1 ? 24 : 10;
-      const top = BAND - 8 - drop;
-      c.beginPath();
-      c.moveTo(x + 4, top); c.lineTo(x + sw - 4, top + 8); c.lineTo(x + sw - 4, BAND + 82); c.lineTo(x + 4, BAND + 82);
-      c.closePath();
-      c.fillStyle = 'rgba(3,12,26,.88)'; c.fill();
-      c.strokeStyle = 'rgba(170,220,245,.65)'; c.lineWidth = 1.6; c.stroke();
-      c.fillStyle = '#eef8ff'; c.font = '800 22px Arial,sans-serif'; c.textAlign = 'center';
-      c.shadowColor = 'rgba(120,220,255,.45)'; c.shadowBlur = 8;
-      c.fillText('X' + MULT[i], x + sw / 2, BAND + 44);
-      c.shadowBlur = 0;
-      c.font = '700 14px Arial,sans-serif'; c.fillStyle = '#cfe8f8';
-      c.fillText('' + game.hit[i], x + sw / 2, BAND + 68);
+    // pegs (drift slowly)
+    for (const P of [game.pegs, game.lowerPegs]) for (const q of P) {
+      c.fillStyle = 'rgba(170,185,200,.18)'; c.beginPath(); c.arc(q[0], q[1], 8.5, 0, 7); c.fill();
+      const g = c.createRadialGradient(q[0] - 1.8, q[1] - 1.8, .5, q[0], q[1], 6);
+      g.addColorStop(0, '#eef2f5'); g.addColorStop(.55, '#b4bcc5'); g.addColorStop(1, '#7f8a95');
+      c.fillStyle = g; c.beginPath(); c.arc(q[0], q[1], 6, 0, 7); c.fill();
     }
+    // slot hit tint
+    for (const [x0, x1, sl] of SLOT_X) { const f = game.slotFlash[sl]; if (f && f.life > 0) { c.fillStyle = rgb(TEAMS[f.team].c, .45 * f.life); c.fillRect(x0 + 2, 448, x1 - x0 - 4, 92); } }
+    for (let k = 0; k < 5; k++) { const f = game.itemFlash[k]; if (f && f.life > 0) { c.fillStyle = rgb(TEAMS[f.team].c, .3 * f.life); c.fillRect(ITEM_X[k] + 12, 935, ITEM_X[k + 1] - ITEM_X[k] - 24, 117); } }
+    // wide translucent trajectory bands for big marbles (ref: long straight light strips)
+    c.save(); c.lineCap = 'butt'; c.lineJoin = 'round';
+    const big = game.marbles.filter(m => m.v >= 1.6e4).sort((a, b) => b.v - a.v).slice(0, 3);
+    for (const m of big) {
+      if (m.path.length < 1) continue;
+      c.strokeStyle = rgb(TEAMS[m.team].c, .13); c.lineWidth = m.r * 1.5;
+      c.beginPath(); c.moveTo(m.path[0][0], m.path[0][1]); for (const q of m.path) c.lineTo(q[0], q[1]); c.lineTo(m.x, m.y); c.stroke();
+    }
+    c.restore();
+    // marbles: comet tail + glossy sphere + label
     for (const m of game.marbles) {
-      const team = TEAMS[m.team], r = m.r;
-      if (m.trail.length > 1) {
-        c.save(); c.globalCompositeOperation = 'lighter'; c.lineWidth = Math.max(2, r * .45);
-        c.strokeStyle = rgb(team.glow, .35); c.beginPath();
-        for (let j = 0; j < m.trail.length; j++) { const [tx, ty] = m.trail[j]; j ? c.lineTo(tx, ty) : c.moveTo(tx, ty); }
-        c.stroke(); c.restore();
-      }
-      c.save(); c.globalCompositeOperation = 'lighter';
-      c.drawImage(SPR2D.team[m.team], m.x - r * 2.2, m.y - r * 2.2, r * 4.4, r * 4.4);
-      c.restore();
-      const gr = c.createRadialGradient(m.x - r * .3, m.y - r * .4, 1, m.x, m.y, r);
-      gr.addColorStop(0, '#fff'); gr.addColorStop(.2, rgb(team.hi)); gr.addColorStop(1, rgb(team.c));
-      c.fillStyle = gr; c.beginPath(); c.arc(m.x, m.y, r, 0, Math.PI * 2); c.fill();
-      c.strokeStyle = 'rgba(255,255,255,.8)'; c.lineWidth = 1.3; c.stroke();
-      c.fillStyle = '#fff'; c.textAlign = 'center'; c.font = `800 ${r > 15 ? 12 : r > 11 ? 10 : 8}px Arial,sans-serif`;
-      c.fillText(fmt(m.v), m.x, m.y + 3.5);
+      const team = TEAMS[m.team], r = m.r, sp = Math.hypot(m.vx, m.vy) || 1, ux = m.vx / sp, uy = m.vy / sp;
+      const L = Math.min(48, 14 + r * 2.4);
+      const tg = c.createLinearGradient(m.x, m.y, m.x - ux * L, m.y - uy * L);
+      tg.addColorStop(0, rgb(team.hi, .75)); tg.addColorStop(1, rgb(team.c, 0));
+      c.fillStyle = tg; c.beginPath(); c.moveTo(m.x + uy * r * .7, m.y - ux * r * .7); c.lineTo(m.x - ux * L, m.y - uy * L); c.lineTo(m.x - uy * r * .7, m.y + ux * r * .7); c.closePath(); c.fill();
+      const g = c.createRadialGradient(m.x - r * .35, m.y - r * .45, r * .1, m.x, m.y, r);
+      g.addColorStop(0, rgb([Math.min(255, team.hi[0] + 70), Math.min(255, team.hi[1] + 70), Math.min(255, team.hi[2] + 70)])); g.addColorStop(.45, rgb(team.c)); g.addColorStop(1, rgb([team.c[0] * .55, team.c[1] * .55, team.c[2] * .55]));
+      c.fillStyle = g; c.beginPath(); c.arc(m.x, m.y, r, 0, 7); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,.55)'; c.lineWidth = 1; c.stroke();
+      c.fillStyle = 'rgba(255,255,255,.55)'; c.beginPath(); c.ellipse(m.x - r * .3, m.y - r * .55, r * .4, r * .18, -.4, 0, 7); c.fill();
+      const txt = fmt(m.v);
+      c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.font = `800 ${Math.round(r * (txt.length > 3 ? .62 : .78))}px Arial,sans-serif`;
+      c.lineWidth = 2; c.strokeStyle = 'rgba(0,0,0,.35)'; c.strokeText(txt, m.x, m.y + .5); c.fillText(txt, m.x, m.y + .5);
     }
-    const iw = LEFT / 5, icons = ['✧', '枪', '盾', '●', '⊕'];
+    c.textBaseline = 'alphabetic';
+    // pillars + labels drawn above marbles (marbles drop into cups)
+    for (const [x, w, top] of LPILLARS) { pillar(c, x, w, top, 540); pillar(c, LEFT - x - w, w, top, 540); }
+    for (let i = 0; i < 6; i++) {
+      c.fillStyle = '#f2f8fc'; c.textAlign = 'center'; c.font = '800 23px Arial,sans-serif';
+      c.fillText('X' + MULT[i], SLOT_LABEL_X[i], 510);
+      c.font = '700 14px Arial,sans-serif'; c.fillStyle = '#dfeaf2'; c.fillText('' + game.hit[i], SLOT_LABEL_X[i], 528);
+    }
+    for (const [x, w, top] of IPILLARS) pillar(c, x, w, top, 1052);
     for (let i = 0; i < 5; i++) {
-      const x = i * iw + 6, w = iw - 12, active = game.items[i] > 0;
-      rr(c, x, ITEMY, w, ITEMH, 6, active ? 'rgba(8,28,48,.92)' : 'rgba(4,12,24,.88)', active ? 'rgba(120,210,255,.75)' : 'rgba(140,190,220,.45)', 1.5);
-      c.fillStyle = active ? '#d8f4ff' : '#9eb8cc'; c.textAlign = 'center';
-      c.font = '22px sans-serif'; c.fillText(icons[i], x + w / 2, ITEMY + 48);
-      c.font = '700 15px "Microsoft YaHei",sans-serif'; c.fillText(NAMES[i], x + w / 2, ITEMY + 78);
-      c.fillStyle = '#f0faff'; c.font = '800 18px Arial'; c.fillText('' + game.items[i], x + w / 2, ITEMY + 118);
+      const cx = (ITEM_X[i] + ITEM_X[i + 1]) / 2 + (i === 0 ? 4 : i === 4 ? -4 : 0), dy = [0, 8, 12, 8, 0][i];
+      drawIcon(c, i, cx, 981 + dy);
+      c.fillStyle = '#d7e6f0'; c.textAlign = 'center'; c.font = '600 15px "PingFang SC","Microsoft YaHei",sans-serif';
+      c.fillText(NAMES[i], cx, 1009 + dy);
+      c.strokeStyle = 'rgba(150,190,210,.25)'; c.lineWidth = 1; c.beginPath(); c.moveTo(cx - 30, 1040); c.lineTo(cx + 30, 1040); c.stroke();
+      c.fillStyle = '#f2f8fc'; c.font = '700 14px Arial,sans-serif'; c.fillText('' + game.items[i], cx, 1071);
     }
-    c.strokeStyle = '#243848'; c.beginPath(); c.moveTo(LEFT - 1, 0); c.lineTo(LEFT - 1, H); c.stroke();
   }
 
   /* ===================== PIXI RENDERER ===================== */
@@ -577,6 +654,7 @@
       this.arena = new PIXI.Container();
       this.arena.x = AX; this.arena.y = AY;
       this.root.addChild(this.arena);
+      this.arenaMask = new PIXI.Graphics().rect(AX, AY, G, G).fill(0xffffff); this.root.addChild(this.arenaMask); this.arena.mask = this.arenaMask;
 
       // bg
       this.bg = new PIXI.Graphics().rect(0, 0, G, G).fill(0x02080f);
@@ -875,14 +953,14 @@
         if (len > 1) {
           g.moveTo(p.trail[0][0], p.trail[0][1]);
           for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]);
-          if (p.kind === 2) g.stroke({ width: 4.5, color: team.hex, alpha: 0.55 });
+          if (p.kind === 2) { const rr = clamp(40 + Math.sqrt(p.value / 1e6) * 16, 40, 110); g.stroke({ width: rr * 1.7, color: team.hex, alpha: 0.32, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
           else if (p.kind === 3) g.stroke({ width: 2.4, color: team.hex, alpha: 0.65 });
           else if (age > .45 || p.kind === 4) g.stroke({ width: 1.2, color: 0xffffff, alpha: 0.28 });
           else g.stroke({ width: 1.5, color: 0xffffff, alpha: 0.22 });
         }
         if (p.kind === 2) {
           if (bi >= this.ballPool.length) continue;
-          const r = clamp(26 + Math.sqrt(p.value / 1e6) * 9, 34, 150), B = this.ballPool[bi++];
+          const r = clamp(40 + Math.sqrt(p.value / 1e6) * 16, 40, 110), B = this.ballPool[bi++];
           B.c.visible = true; B.c.x = p.x; B.c.y = p.y;
           B.glow.texture = this.teamGlowTex[p.team]; B.glow.width = B.glow.height = r * 3.4;
           const key = p.team + ':' + (r | 0);
@@ -932,7 +1010,7 @@
       for (let t = 0; t < 4; t++) {
         const team = TEAMS[t], [ux, uy] = corner[t];
         const x = AX + G * ux, y = AY + G * uy;
-        const r = 64;
+        const r = 92;
         const pulse = Math.sin(game.t * 2.4 + t) * 2.8;
         // outer glow disc
         if (game.flood === t) { g.circle(x, y, r + 26).fill({ color: team.hex, alpha: .9 }); g.circle(x, y, r + 34).stroke({ width: 8, color: 0xffffff, alpha: .8 }); }
@@ -942,23 +1020,27 @@
         g.circle(x, y, r - 6).fill({ color: 0x020812, alpha: 0.78 });
         // aim
         const a = game.aim[t];
-        g.moveTo(x, y).lineTo(x + Math.cos(a) * (r * .58), y + Math.sin(a) * (r * .58));
-        g.stroke({ width: 3.5, color: team.hex, alpha: 0.9 });
-        g.circle(x, y, 3.5).fill({ color: team.hex, alpha: 1 });
+        // rotating turret: hub + barrel that sticks out past the ring; streams follow this angle
+        const ca = Math.cos(a), sa = Math.sin(a), px = -sa, py = ca, L0 = 6, L1 = r + 22, bw = 6;
+        g.poly([x + ca * L0 + px * bw, y + sa * L0 + py * bw, x + ca * L1 + px * (bw * .7), y + sa * L1 + py * (bw * .7), x + ca * L1 - px * (bw * .7), y + sa * L1 - py * (bw * .7), x + ca * L0 - px * bw, y + sa * L0 - py * bw])
+          .fill({ color: team.hex, alpha: .95 }).stroke({ width: 1.5, color: 0xffffff, alpha: .8 });
+        g.moveTo(x + ca * L0, y + sa * L0).lineTo(x + ca * L1, y + sa * L1).stroke({ width: 1.6, color: 0xffffff, alpha: .9 });
+        g.circle(x + ca * L1, y + sa * L1, 5).fill({ color: 0xffffff, alpha: .9 });
+        g.circle(x, y - 3, 8).fill({ color: 0x07111c, alpha: 1 }).stroke({ width: 2.2, color: team.hex, alpha: 1 });
+        g.circle(x, y - 3, 3).fill({ color: 0xffffff, alpha: 1 });
 
         const texts = this.baseTexts[t];
-        const ammoFs = clamp(r * .42, 22, 40);
-        texts.ammo.style.fontSize = ammoFs;
-        texts.ammo.text = fmt(game.ammo[t]);
-        texts.ammo.x = x - r * .22; texts.ammo.y = y - r * .12;
-        texts.ammo.style.fill = 0xffffff;
-
+        // ref layout: [shield] 25.86M  /  hub  /  [gun box] 241,410
+        texts.ammo.style.fontSize = 21; texts.ammo.text = fmt(game.ammo[t]); texts.ammo.x = x - 22; texts.ammo.y = y - 26; texts.ammo.style.fill = 0xffffff;
+        const sx = x - 42, sy = y - 26; // shield icon
+        g.poly([sx, sy - 9, sx + 8, sy - 6, sx + 7, sy + 3, sx, sy + 9, sx - 7, sy + 3, sx - 8, sy - 6]).stroke({ width: 1.6, color: 0xffffff, alpha: .85 });
+        g.poly([sx, sy - 4, sx + 4, sy - 2.5, sx + 3.5, sy + 2, sx, sy + 4.5, sx - 3.5, sy + 2, sx - 4, sy - 2.5]).fill({ color: team.hex, alpha: 1 });
         const secondary = Math.max(1000, Math.round(120000 + game.share[t] * 1.2e6 + game.t * 900));
-        const pw = r * 1.35, ph = Math.max(22, r * .32);
-        g.roundRect(x - pw / 2, y + r * .02, pw, ph, 5).fill({ color: 0x020812, alpha: 0.75 }).stroke({ width: 1, color: 0xc8e6fa, alpha: 0.22 });
-        texts.sec.style.fontSize = Math.max(13, r * .24);
-        texts.sec.text = fmtScore(secondary);
-        texts.sec.x = x; texts.sec.y = y + r * .02 + ph * .5;
+        g.roundRect(x - 72, y + 9, 144, 26, 4).fill({ color: 0x02060c, alpha: .55 }).stroke({ width: 1, color: 0xc8e6fa, alpha: .25 });
+        const gx2 = x - 56, gy2 = y + 22; // gun icon
+        g.rect(gx2 - 10, gy2 - 1.5, 20, 3).fill({ color: 0xffffff, alpha: .8 }); g.rect(gx2 - 4, gy2 + 1, 3, 4).fill({ color: 0xffffff, alpha: .8 });
+        texts.sec.style.fontSize = 17; texts.sec.text = fmtScore(secondary); texts.sec.style.fill = team.hex === 0xffa514 ? 0xffe0b0 : 0xffffff;
+        texts.sec.x = x + 8; texts.sec.y = y + 22;
       }
     }
 
