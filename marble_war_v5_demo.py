@@ -327,7 +327,14 @@ class Demo:
         self.slot_hits = np.zeros(len(self.layout.slots), int)
         self.space = build_plinko_space(self.layout)  # LEFT physics
         self.bases = corner_bases(nt, G)
-        self.grid = np.full((G, G), self.nt, np.int8)   # FULLY NEUTRAL start (no pre-colored territories)
+        self.grid = np.full((G, G), self.nt, np.int8)   # start neutral, then seed a solid blob at each base
+        for ti in range(nt):
+            bx, by = self.bases[ti]
+            rr = int(PROT_R * 0.98)
+            for yy in range(max(0, int(by) - rr), min(G, int(by) + rr + 1)):
+                for xx in range(max(0, int(bx) - rr), min(G, int(bx) + rr + 1)):
+                    if (xx - bx) ** 2 + (yy - by) ** 2 <= rr * rr:
+                        self.grid[yy, xx] = ti
         # single barrel angle per team (radians), rotating outward until Boss
         self.ang = np.array([
             math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
@@ -335,7 +342,7 @@ class Demo:
         ], dtype=np.float64)
         self.spin = 0.042             # unified clockwise spin rad/frame after opening
         self.fire_cd = np.zeros(nt, int)
-        self.fire_period = 2          # dense enough for a cloud at slow speed
+        self.fire_period = 3          # sparse slow white dots (not a machine-gun cloud)
         self.fire_period_pow = 16     # power-up: one big numbered ball, slower
         # team state (NO levels)
         self.mult_bonus = np.ones(nt, int)   # from boss rewards, applied to marbles
@@ -614,11 +621,19 @@ class Demo:
         self.grid[self.grid == victim] = killer
 
     def threat_target(self, t):
-        """Biggest incoming threat: score = power_number / distance. None if safe."""
+        """Highest-threat enemy projectile currently INSIDE trigger range.
+
+        Trigger ranges (only then do we break free rotation):
+          • normal white dots: dist < PROT_R * 2
+          • item projectiles (大球 / 散射 / 激光 numbered): dist < G / 2  (~half map)
+        Score = power × proximity × approach. None → keep free clockwise spin.
+        """
         if not self.alive_t[t]:
             return None
         bx, by = self.bases[t]
         best, best_sc = None, 0.0
+        R_NORMAL = PROT_R * 2.0
+        R_ITEM = G * 0.5
         for i in range(NMAX):
             if not self.palive[i]:
                 continue
@@ -628,20 +643,26 @@ class Demo:
             px, py = float(self.px[i]), float(self.py[i])
             dx, dy = bx - px, by - py
             dist = math.hypot(dx, dy) + 1e-3
-            # heading toward base?
+            is_item = bool(self.ppow[i]) or int(self.pkind[i]) in (1, 2, 3)
+            if is_item:
+                if dist > R_ITEM:
+                    continue
+            else:
+                if dist > R_NORMAL:
+                    continue
             vx, vy = float(self.pvx[i]), float(self.pvy[i])
             spd = math.hypot(vx, vy) + 1e-6
             approach = (vx * dx + vy * dy) / (spd * dist)
-            if approach < 0.15:  # not really coming at us
+            if approach < 0.10:
                 continue
             power = float(self.pval[i]) if self.ppow[i] else 3.0
-            # big balls weigh heavily
             if self.pkind[i] == 2:
                 power *= 4.0
-            sc = power * (180.0 / dist) * max(0.2, approach)
-            # imminent hits get huge boost
-            if dist < PROT_R * 2.2:
-                sc *= 3.0
+            elif is_item:
+                power *= 1.8
+            sc = power * (200.0 / dist) * max(0.25, approach)
+            if dist < PROT_R * 1.4:
+                sc *= 2.5
             if sc > best_sc:
                 best_sc, best = sc, (px, py, dist, power)
         return best
@@ -692,17 +713,34 @@ class Demo:
         else:
             # normal: slower + denser small-particle jet
             self.fire_cd[t] = self.fire_period
-            speed = 2.6; energy = 10.0; r0 = 28.0; n_shot = 7; spread = 0.48; kind = 0  # slow-ish white-dot cloud
+            speed = 1.45; energy = 9.0; r0 = 28.0; n_shot = 3; spread = 0.30; kind = 0  # sparse slow white dots
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
             a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
             jitter = 0.0 if powered else self.rng.uniform(-0.04, 0.04)
             a += jitter
             sp = speed * (1.0 if powered else self.rng.uniform(0.88, 1.12))
-            self.px[i] = bx + math.cos(a) * r0
-            self.py[i] = by + math.sin(a) * r0
-            self.pvx[i] = math.cos(a) * sp
-            self.pvy[i] = math.sin(a) * sp
+            ca, sa = math.cos(a), math.sin(a)
+            # Normal shots spawn at the frontier (first non-own cell along aim) so
+            # opposing fire meets & cancels instead of painting long spokes.
+            if not powered:
+                sx, sy = bx + ca * r0, by + sa * r0
+                for step in range(20, int(G * 0.75), 4):
+                    qx, qy = int(bx + ca * step), int(by + sa * step)
+                    if qx < 1 or qy < 1 or qx >= G - 1 or qy >= G - 1:
+                        break
+                    o = int(self.grid[qy, qx])
+                    if o != t:
+                        sx, sy = bx + ca * max(r0, step - 2), by + sa * max(r0, step - 2)
+                        break
+                else:
+                    sx, sy = bx + ca * 120.0, by + sa * 120.0
+                self.px[i], self.py[i] = sx, sy
+            else:
+                self.px[i] = bx + ca * r0
+                self.py[i] = by + sa * r0
+            self.pvx[i] = ca * sp
+            self.pvy[i] = sa * sp
             self.ptm[i] = t
             self.pval[i] = energy
             self.pbase[i] = energy
@@ -758,120 +796,230 @@ class Demo:
                             remaining -= dmg
                             continue
                         self.grid[y2, x2] = t
-                        remaining -= PAINT_COST  # ONLY other-team paints decrease number
+                        remaining = 0  # laser stops at first enemy frontier pixel (sharp border)
                         self.fx[y2, x2] = np.maximum(self.fx[y2, x2],
                             np.array(TEAMS[t][1], np.float32) * 0.8)
 
     def tick_projectiles(self, ev=None):
+        """Move → bullet-vs-bullet cancel → frontier paint (consume on first enemy pixel).
+
+        Opposing bullets that occupy the same ~cell annihilate, so fronts stay sharp.
+        Painting enemy territory consumes the bullet immediately (no deep tunneling /
+        speckled mixing). Neutral paint is allowed; own color is ignored.
+        """
         if ev is None:
             ev = []
         boss_on = self.boss is not None and self.boss["hp"] > 0
         nt = self.nt
+        CELL = 6  # spatial hash cell size (px)
+
+        # ---- 1) move + wall bounce ----
         for i in range(NMAX):
             if not self.palive[i]:
                 continue
             t = int(self.ptm[i])
-            if not self.alive_t[t]:
-                self.palive[i] = False
-                continue
-            val0 = float(self.pval[i])
-            if val0 <= 0:
+            if not self.alive_t[t] or self.pval[i] <= 0:
                 self.palive[i] = False
                 continue
             kind = int(self.pkind[i])
-            # visual / paint radius
-            if kind == 2:  # big
-                rad = max(14.0, min(G / 10.0, 9.0 + 14.0 * (val0 / max(1.0, float(self.pbase[i])))))
-            elif self.ppow[i]:
-                rad = max(6.0, 7.0 + 8.0 * (val0 / max(1.0, float(self.pbase[i]))))
-            else:
-                rad = 2.2  # tiny white dots
             steps = 2 if kind == 2 else 1
             for _s in range(steps):
                 self.px[i] += self.pvx[i] / steps
                 self.py[i] += self.pvy[i] / steps
-                x, y = float(self.px[i]), float(self.py[i])
-                if x < 1 or x >= G - 1:
-                    self.pvx[i] = -self.pvx[i]
-                    self.px[i] = min(max(x, 1.0), G - 1.5)
-                    x = float(self.px[i])
-                if y < 1 or y >= G - 1:
-                    self.pvy[i] = -self.pvy[i]
-                    self.py[i] = min(max(y, 1.0), G - 1.5)
-                    y = float(self.py[i])
-                ix, iy = int(x), int(y)
-                r = max(1, int(rad))
-                yy0, yy1 = max(0, iy - r), min(G, iy + r + 1)
-                xx0, xx1 = max(0, ix - r), min(G, ix + r + 1)
-                if yy0 >= yy1 or xx0 >= xx1:
+            x, y = float(self.px[i]), float(self.py[i])
+            if x < 1 or x >= G - 1:
+                self.pvx[i] = -self.pvx[i]
+                self.px[i] = min(max(x, 1.0), G - 1.5)
+            if y < 1 or y >= G - 1:
+                self.pvy[i] = -self.pvy[i]
+                self.py[i] = min(max(y, 1.0), G - 1.5)
+
+        # ---- 2) bullet-vs-bullet cancellation (spatial hash, generous radius) ----
+        buckets = {}
+        alive_idx = [int(i) for i in np.nonzero(self.palive)[0]]
+        for i in alive_idx:
+            cx = int(self.px[i]) // CELL
+            cy = int(self.py[i]) // CELL
+            buckets.setdefault((cx, cy), []).append(i)
+        killed = set()
+
+        def _rad(i):
+            if self.pkind[i] == 2:
+                return 22.0
+            if self.ppow[i]:
+                return 10.0
+            return 5.5  # white dots — fat enough they cannot slip past
+
+        def _w(i):
+            p = float(self.pval[i])
+            if self.pkind[i] == 2:
+                return p * 4.0
+            if self.ppow[i]:
+                return p * 2.0
+            return p
+
+        for (cx, cy), ids in buckets.items():
+            neigh = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neigh.extend(buckets.get((cx + dx, cy + dy), ()))
+            if len(neigh) < 2:
+                continue
+            for a in ids:
+                if a in killed or not self.palive[a]:
                     continue
-                ys = np.arange(yy0, yy1, dtype=np.int32)[:, None]
-                xs = np.arange(xx0, xx1, dtype=np.int32)[None, :]
-                disk = (xs - ix) * (xs - ix) + (ys - iy) * (ys - iy) <= r * r
-                if not disk.any():
-                    continue
-                # base hit: any disk pixel inside enemy protect circle
-                hit_base = -1
-                for ob in range(nt):
-                    if ob == t or not self.alive_t[ob]:
+                ta = int(self.ptm[a]); ax, ay = float(self.px[a]), float(self.py[a]); ra = _rad(a)
+                for b in neigh:
+                    if b <= a or b in killed or not self.palive[b]:
                         continue
-                    bx, by = float(self.bases[ob, 0]), float(self.bases[ob, 1])
-                    # quick reject
-                    if (ix - bx) ** 2 + (iy - by) ** 2 > (PROT_R + r + 2) ** 2:
+                    tb = int(self.ptm[b])
+                    if ta == tb:
                         continue
-                    d2 = (xs.astype(np.float64) - bx) ** 2 + (ys.astype(np.float64) - by) ** 2
-                    if np.any(disk & (d2 < PROT_R * PROT_R)):
-                        hit_base = ob
-                        break
-                if hit_base >= 0:
-                    if self.phit[i] != hit_base:
-                        dmg = float(self.pval[i]) if self.ppow[i] else 3.5
-                        self.apply_base_damage(hit_base, dmg, t, ev)
-                        self.phit[i] = hit_base
-                        self.pval[i] = 0
-                        self.palive[i] = False
-                    break
-                patch = self.grid[yy0:yy1, xx0:xx1]
-                # boss cells
-                if boss_on:
-                    boss_m = disk & (patch == nt + 1)
-                    nb = int(boss_m.sum())
-                    if nb:
-                        dmg = min(1.5 * nb, float(self.pval[i]))
-                        self.boss_dmg[t] += dmg
-                        self.pval[i] -= dmg
-                        self._float_boss(t, dmg)
-                        if self.pval[i] <= 0:
-                            self.palive[i] = False
-                            break
-                # paint neutral free; enemy costs
-                neu = disk & (patch == nt)
-                foe = disk & (patch < nt) & (patch != t)
-                if neu.any():
-                    patch[neu] = t
-                n_foe = int(foe.sum())
-                if n_foe:
-                    cost = PAINT_COST * n_foe
-                    take = min(float(self.pval[i]), cost)
-                    # paint proportional to remaining energy
-                    if take < cost and n_foe > 0:
-                        # paint only some foe cells
-                        ys_f, xs_f = np.where(foe)
-                        keep = max(1, int(len(ys_f) * (take / cost)))
-                        patch[ys_f[:keep], xs_f[:keep]] = t
-                        self.pval[i] -= take
+                    bx, by = float(self.px[b]), float(self.py[b]); rb = _rad(b)
+                    dx, dy = ax - bx, ay - by
+                    lim = ra + rb
+                    if dx * dx + dy * dy > lim * lim:
+                        continue
+                    wa, wb = _w(a), _w(b)
+                    if wa >= wb:
+                        self.palive[b] = False; self.pval[b] = 0; killed.add(b)
+                        self.pval[a] = float(self.pval[a]) * max(0.0, 1.0 - wb / max(wa, 1e-6))
+                        if self.pval[a] <= 0.4:
+                            self.palive[a] = False; self.pval[a] = 0; killed.add(a); break
                     else:
-                        patch[foe] = t
-                        self.pval[i] -= cost
-                # fx spark at center
-                if neu.any() or n_foe:
-                    self.fx[iy, ix] = np.maximum(
-                        self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
-                # mild drain so shots end
-                self.pval[i] -= 0.004 if kind == 0 else 0.01
+                        self.palive[a] = False; self.pval[a] = 0; killed.add(a)
+                        self.pval[b] = float(self.pval[b]) * max(0.0, 1.0 - wa / max(wb, 1e-6))
+                        if self.pval[b] <= 0.4:
+                            self.palive[b] = False; self.pval[b] = 0; killed.add(b)
+                        break
+
+        # ---- 3) frontier paint / base / boss (consume on first enemy contact) ----
+        for i in range(NMAX):
+            if not self.palive[i]:
+                continue
+            t = int(self.ptm[i])
+            kind = int(self.pkind[i])
+            val0 = float(self.pval[i])
+            if kind == 2:
+                rad = max(14.0, min(G / 10.0, 9.0 + 14.0 * (val0 / max(1.0, float(self.pbase[i])))))
+            elif self.ppow[i]:
+                rad = max(6.0, 7.0 + 8.0 * (val0 / max(1.0, float(self.pbase[i]))))
+            else:
+                rad = 2.0
+            x, y = float(self.px[i]), float(self.py[i])
+            ix, iy = int(x), int(y)
+            if not (0 <= ix < G and 0 <= iy < G):
+                self.palive[i] = False
+                continue
+            r = max(1, int(rad))
+            # base protect hit (center point for tiny; disk for big)
+            hit_base = -1
+            for ob in range(nt):
+                if ob == t or not self.alive_t[ob]:
+                    continue
+                bx, by = float(self.bases[ob, 0]), float(self.bases[ob, 1])
+                if (ix - bx) ** 2 + (iy - by) ** 2 < (PROT_R + r * 0.3) ** 2:
+                    # refine
+                    if (x - bx) ** 2 + (y - by) ** 2 < PROT_R * PROT_R:
+                        hit_base = ob; break
+            if hit_base >= 0:
+                dmg = float(self.pval[i]) if self.ppow[i] else 3.5
+                self.apply_base_damage(hit_base, dmg, t, ev)
+                self.palive[i] = False; self.pval[i] = 0
+                continue
+            # boss cell under center
+            o = int(self.grid[iy, ix])
+            if boss_on and o == nt + 1:
+                dmg = min(1.5, float(self.pval[i]))
+                self.boss_dmg[t] += dmg
+                self.pval[i] -= dmg
+                self._float_boss(t, dmg)
                 if self.pval[i] <= 0:
                     self.palive[i] = False
-                    break
+                continue
+            # Connected-frontier paint: only expand from own blob / base (solid regions).
+            def _near_own(px, py, rad=4):
+                """True if within `rad` of own color or inside own base bubble — keeps blobs solid."""
+                obx, oby = float(self.bases[t, 0]), float(self.bases[t, 1])
+                if (px - obx) ** 2 + (py - oby) ** 2 < (PROT_R * 1.2) ** 2:
+                    return True
+                y0, y1 = max(0, py - rad), min(G, py + rad + 1)
+                x0, x1 = max(0, px - rad), min(G, px + rad + 1)
+                return bool(np.any(self.grid[y0:y1, x0:x1] == t))
+
+            # own color: reinforce / pass
+            if o == t:
+                self.pval[i] -= 0.008 if kind == 0 else 0.015
+                if self.pval[i] <= 0:
+                    self.palive[i] = False
+                continue
+
+            if boss_on and o == nt:
+                # during Boss: no neutral spokes — fly to Boss / cancel only
+                self.pval[i] -= 0.025
+                if self.pval[i] <= 0:
+                    self.palive[i] = False
+                continue
+
+            # neutral or enemy: paint only if adjacent to own territory (crisp frontier push)
+            if o == nt or (o < nt and o != t):
+                if not _near_own(ix, iy):
+                    # flying over deep neutral / enemy behind the front — no paint, mild drain
+                    self.pval[i] -= 0.15 if kind == 0 else 0.25
+                    if self.pval[i] <= 0:
+                        self.palive[i] = False
+                    continue
+                if o == nt:
+                    # claim a small connected disk of neutral
+                    pr = 6 if kind == 0 else min(max(r, 6), 10)
+                    painted = 0
+                    for dy in range(-pr, pr + 1):
+                        for dx in range(-pr, pr + 1):
+                            if dx * dx + dy * dy > pr * pr:
+                                continue
+                            x2, y2 = ix + dx, iy + dy
+                            if not (0 <= x2 < G and 0 <= y2 < G):
+                                continue
+                            oo = int(self.grid[y2, x2])
+                            if oo == nt and _near_own(x2, y2):
+                                self.grid[y2, x2] = t; painted += 1
+                            elif oo < nt and oo != t:
+                                # hit enemy frontier while filling — consume
+                                self.grid[y2, x2] = t
+                                self.fx[iy, ix] = np.maximum(
+                                    self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
+                                self.palive[i] = False; self.pval[i] = 0
+                                painted = -1
+                                break
+                        if painted < 0:
+                            break
+                    if painted < 0:
+                        continue
+                    if painted:
+                        self.fx[iy, ix] = np.maximum(
+                            self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
+                    self.pval[i] -= 0.08 if kind == 0 else 0.15
+                    if self.pval[i] <= 0:
+                        self.palive[i] = False
+                    continue
+                # enemy frontier pixel: flip one, consume bullet
+                self.grid[iy, ix] = t
+                self.fx[iy, ix] = np.maximum(
+                    self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
+                if self.ppow[i] and kind == 2:
+                    for dy in range(-2, 3):
+                        for dx in range(-2, 3):
+                            x2, y2 = ix + dx, iy + dy
+                            if 0 <= x2 < G and 0 <= y2 < G and int(self.grid[y2, x2]) < nt and int(self.grid[y2, x2]) != t:
+                                if _near_own(x2, y2):
+                                    self.grid[y2, x2] = t
+                self.palive[i] = False
+                self.pval[i] = 0
+                continue
+
+            self.pval[i] -= 0.01
+            if self.pval[i] <= 0:
+                self.palive[i] = False
 
     def _float_boss(self, t, dmg):
         if self.boss is None:
@@ -983,19 +1131,16 @@ class Demo:
         self.tick_marbles(ev)
 
         boss_on = self.boss is not None and self.boss["hp"] > 0
-        # aim: opening center spray → clockwise; threats pull aim; Boss unless imminent base threat
+        # aim: open center → free clockwise spin; lock ONLY on in-range threats;
+        # Boss lock unless an in-range threat (threat_target already range-gated)
         for t in range(self.nt):
             if not self.alive_t[t]:
                 continue
             bx, by = self.bases[t]
             threat = self.threat_target(t)
             if threat is not None:
-                tx, ty, dist, _pw = threat
-                # Boss loses priority if a threat is about to hit the base
-                if boss_on and dist > PROT_R * 2.5:
-                    self.ang[t] = math.atan2(self.boss["y"] - by, self.boss["x"] - bx)
-                else:
-                    self.ang[t] = math.atan2(ty - by, tx - bx)
+                tx, ty, _dist, _pw = threat
+                self.ang[t] = math.atan2(ty - by, tx - bx)   # in-range threat overrides Boss
             elif boss_on:
                 self.ang[t] = math.atan2(self.boss["y"] - by, self.boss["x"] - bx)
             elif self.f < OPEN_AIM_F:
@@ -1011,7 +1156,7 @@ class Demo:
         self.tick_boss(ev)
 
         # fx decay
-        self.fx *= 0.82
+        self.fx *= 0.55
         # share
         flat = self.grid.ravel()
         for t in range(self.nt):

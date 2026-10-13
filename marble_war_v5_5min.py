@@ -26,8 +26,8 @@ TOTAL_F = 300 * FPS          # 5:00
 BOSS_F = 180 * FPS           # 3:00 Boss 来袭
 DECIDE_F = 292 * FPS         # 4:52 decision if >1 alive (knockout usually decides first)
 SPAWN_GAP = 84               # frames between drops of one team (~2.8s), staggered
-TINY_DRAIN = 0.03            # white dot lifetime ≈ 10/0.03 ≈ 330f → reaches across map
-TINY_DMG = 1.0
+TINY_DRAIN = 0.055           # white dot lifetime ≈ 10/0.055 ≈ 180f (map-crossing, less pileup)
+TINY_DMG = 0.22
 FOUNTAIN_VX = 12.0           # px/frame horizontal fountain spray (reaches outer 倍率 slots)
 _DISK = [(dx, dy) for dy in range(-2, 3) for dx in range(-2, 3) if dx * dx + dy * dy <= 4]
 
@@ -38,7 +38,7 @@ class _NoForce(dict):
 
 
 class FullGame(Demo):
-    def __init__(self, seed=1, nt=4, hp=1000.0):
+    def __init__(self, seed=1, nt=4, hp=4000.0):
         super().__init__(seed=seed, nt=nt)
         self.maxf = TOTAL_F
         self.boss_f = BOSS_F
@@ -50,6 +50,8 @@ class FullGame(Demo):
         self.log = []                           # (frame, kind, data) story log
         self.share_hist = []
         self.tips = []
+        self.fire_period = 4          # slower denser-enough jets for 5min
+        self.fire_period_pow = 22
         self.tip("开局集火中央 · 随后顺时针旋转", (200, 220, 255), 90)
 
     def spawn_marble(self, t, mult=1, vx=0.0, tag="", force=None):
@@ -76,8 +78,37 @@ class FullGame(Demo):
                 self._detach_body(m); m.alive = False; m.state = "done"
         super().tick_marbles(ev)
 
+    def fire_team(self, t, ev):
+        """Same rules as demo, thinner white cloud for 5-min runtime."""
+        if not self.alive_t[t] or self.fire_cd[t] > 0:
+            return
+        # delegate big_pending / powered to parent by briefly swapping fire params
+        # For normal jets, fire fewer ourselves mirroring parent logic
+        bx, by = self.bases[t]
+        ang = self.ang[t]
+        name = self.power[t]
+        if self.big_pending[t]:
+            return super().fire_team(t, ev)
+        powered = bool(name and self.power_t[t] > 0 and name != "大球")
+        if powered:
+            return super().fire_team(t, ev)
+        self.fire_cd[t] = self.fire_period
+        speed, energy, r0, n_shot, spread = 2.4, 8.0, 28.0, 4, 0.42
+        ids = self._alloc(n_shot)
+        for k, i in enumerate(ids):
+            a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
+            a += self.rng.uniform(-0.04, 0.04)
+            sp = speed * self.rng.uniform(0.88, 1.12)
+            self.px[i] = bx + __import__("math").cos(a) * r0
+            self.py[i] = by + __import__("math").sin(a) * r0
+            self.pvx[i] = __import__("math").cos(a) * sp
+            self.pvy[i] = __import__("math").sin(a) * sp
+            self.ptm[i] = t; self.pval[i] = energy; self.pbase[i] = energy
+            self.palive[i] = True; self.pkind[i] = 0; self.ppow[i] = False; self.phit[i] = -1
+
     # vectorized threat scan ---------------------------------------------
     def threat_target(self, t):
+        """Same range-gated threat lock as demo (vectorized)."""
         if not self.alive_t[t]:
             return None
         m = self.palive & (self.ptm != t)
@@ -92,77 +123,21 @@ class FullGame(Demo):
         px, py = self.px[idx], self.py[idx]
         dx, dy = bx - px, by - py
         dist = np.hypot(dx, dy) + 1e-3
+        is_item = self.ppow[idx] | np.isin(self.pkind[idx], (1, 2, 3))
+        in_range = np.where(is_item, dist <= G * 0.5, dist <= PROT_R * 2.0)
         vx, vy = self.pvx[idx], self.pvy[idx]
         spd = np.hypot(vx, vy) + 1e-6
         appr = (vx * dx + vy * dy) / (spd * dist)
         power = np.where(self.ppow[idx], self.pval[idx], 3.0)
         power = np.where(self.pkind[idx] == 2, power * 4.0, power)
-        sc = power * (180.0 / dist) * np.maximum(0.2, appr)
-        sc = np.where(dist < PROT_R * 2.2, sc * 3.0, sc)
-        sc = np.where((appr < 0.15) | (dist > PROT_R * 4.0), 0.0, sc)
+        power = np.where(is_item & (self.pkind[idx] != 2), power * 1.8, power)
+        sc = power * (200.0 / dist) * np.maximum(0.25, appr)
+        sc = np.where(dist < PROT_R * 1.4, sc * 2.5, sc)
+        sc = np.where((~in_range) | (appr < 0.10), 0.0, sc)
         k = int(np.argmax(sc))
         if sc[k] <= 0:
             return None
         return (float(px[k]), float(py[k]), float(dist[k]), float(power[k]))
-
-    # vectorized white dots, parent loop for numbered balls ----------------
-    def tick_projectiles(self, ev=None):
-        if ev is None:
-            ev = []
-        nt = self.nt
-        tiny = self.palive & (~self.ppow) & (self.pkind == 0)
-        idx = np.nonzero(tiny)[0]
-        if idx.size:
-            tm = self.ptm[idx].astype(int)
-            dead = ~self.alive_t[tm]
-            self.palive[idx[dead]] = False
-            idx = idx[~dead]; tm = tm[~dead]
-        if idx.size:
-            self.px[idx] += self.pvx[idx]; self.py[idx] += self.pvy[idx]
-            for P, Vv in ((self.px, self.pvx), (self.py, self.pvy)):
-                o = (P[idx] < 1) | (P[idx] >= G - 1)
-                Vv[idx[o]] *= -1
-                P[idx] = np.clip(P[idx], 1.0, G - 1.5)
-            x, y = self.px[idx], self.py[idx]
-            hit = np.zeros(idx.size, bool)
-            for ob in range(nt):
-                if not self.alive_t[ob]:
-                    continue
-                d2 = (x - self.bases[ob, 0]) ** 2 + (y - self.bases[ob, 1]) ** 2
-                h = (d2 < PROT_R * PROT_R) & (tm != ob) & ~hit
-                if h.any():
-                    cnt = np.bincount(tm[h], minlength=nt)
-                    for att in range(nt):
-                        if cnt[att]:
-                            self.apply_base_damage(ob, TINY_DMG * cnt[att], att, ev)
-                    hit |= h
-            self.palive[idx[hit]] = False
-            keep = ~hit
-            idx, tm, x, y = idx[keep], tm[keep], x[keep], y[keep]
-            ix = x.astype(int); iy = y.astype(int)
-            if self.boss is not None and self.boss["hp"] > 0:
-                bm = self.grid[iy, ix] == nt + 1
-                if bm.any():
-                    np.add.at(self.boss_dmg, tm[bm], 1.5)
-                    self.pval[idx[bm]] -= 1.5
-                    for tt in np.unique(tm[bm])[:2]:
-                        self._float_boss(int(tt), 6.0)
-            for dx, dy in _DISK:
-                xx = np.clip(ix + dx, 0, G - 1); yy = np.clip(iy + dy, 0, G - 1)
-                o = self.grid[yy, xx]
-                foe = (o < nt) & (o != tm)
-                paint = (o == nt) | foe
-                self.grid[yy[paint], xx[paint]] = tm[paint].astype(np.int8)
-                self.pval[idx[foe]] -= PAINT_COST
-            self.pval[idx] -= TINY_DRAIN
-            self.palive[idx[self.pval[idx] <= 0]] = False
-        # numbered balls via parent (hide tiny temporarily)
-        tiny = self.palive & (~self.ppow) & (self.pkind == 0)
-        self.palive[tiny] = False
-        try:
-            super().tick_projectiles(ev)
-        finally:
-            self.palive[tiny] = True
 
     def _kill_team(self, victim, killer, ev):
         was = self.alive_t[victim]
