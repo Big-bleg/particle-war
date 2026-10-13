@@ -97,7 +97,7 @@
       // asymmetric momentum: each team has a drifting fire-power multiplier
       this.power = [0, 1, 2, 3].map(() => rand(.8, 1.25)); this.powerClock = 0;
       this.sweepPh = [0, 1, 2, 3].map(() => rand(0, 6.28)); this.sweepSp = [0, 1, 2, 3].map(() => rand(.15, .4));
-      this.events = []; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
+      this.events = []; this.lasers = []; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
       this.ribbons = []; this.silk = new Float32Array(SILK_CAP * 7); this.silkCount = 0;
       this.stars = Array.from({ length: 220 }, () => [rand(0, G), rand(0, G), rand(.2, 1), rand(.5, 2.2)]);
       this.frame = 0; this.dirty = true; this.terrainAge = 0;
@@ -221,10 +221,20 @@
       else if (i === 0) { this.lastStorm[team] = this.t; this.waves.push({ team, r: 70, a: a, half: .55 + Math.min(.35, this.t / 600), sp: 150 + this.t * .4, life: 0 }); this.events.push({ t: this.t, team, kind: 'storm' }); }
       if (i === 1) { for (let k = 0; k < 14; k++) this.spawn(team, 0, 3, a + rand(-.28, .28)); }
       if (i === 2) { this.shield[team] = 1; this.sparks.push({ x: BASES[team][0], y: BASES[team][1], team, life: 1, burst: true }); }
-      if (i === 3 && this.shots.filter(q => q.kind === 2).length >= 3) { bag[i]++; return false; }
+      if (i === 3 && this.shots.filter(q => q.kind === 2).length >= (this.t > 420 ? 2 : 1)) { bag[i]++; return false; }
       if (i === 3) { this.ammo[team] += 2e5; this.spawn(team, 2, 1, a); const s2 = this.shots[this.shots.length - 1]; if (s2 && s2.kind === 2) s2.value = rand(3e5, 1.2e6) * (1 + this.t / 500); this.events.push({ t: this.t, team, kind: 'bigball' }); }
-      if (i === 4) this.spawn(team, 3, 6, a);
+      if (i === 4) { this.spawn(team, 3, 6, a); this.lasers.push({ team, a: a + rand(-.15, .15), life: 1.4 }); }
       return true;
+    }
+    paintSolid(x, y, team, r) {
+      const gx = x / S, gy = y / S, gr = r / S, g0 = Math.ceil(gr);
+      for (let dy = -g0; dy <= g0; dy++) for (let dx = -g0; dx <= g0; dx++) {
+        if (dx * dx + dy * dy > gr * gr) continue;
+        const xx = Math.round(gx + dx), yy = Math.round(gy + dy); if (xx < 0 || yy < 0 || xx >= GS || yy >= GS) continue;
+        const i = yy * GS + xx;
+        if (this.grid[i] !== team) { this.grid[i] = team; this.score[team] = Math.max(0, this.score[team] + 35); this.dirty = true; }
+        this.heat[i] = Math.max(this.heat[i], .5);
+      }
     }
     paint(x, y, team, r) {
       const gx = Math.round(x / S), gy = Math.round(y / S), gr = Math.max(1, Math.ceil(r / S));
@@ -431,7 +441,7 @@
           this.waves.push({ team: lead, r: 90, a: Math.atan2(G / 2 - by, G / 2 - bx) + rand(-.25, .25), half: .9, sp: 170, life: 0, big: true });
         }
         if (this.t > 235 && this.t < 380 && !this.shots.some(q => q.kind === 2)) { const lead = (Math.random() * 4) | 0, bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
-        if (Math.random() < dt * (this.t > 240 ? .3 : this.t > 120 ? .1 : .015) && this.shots.filter(q => q.kind === 2).length < 3) { const lead = [0, 1, 2, 3][(Math.random() * 4) | 0]; const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
+        if (Math.random() < dt * (this.t > 240 ? .08 : this.t > 120 ? .04 : .015) && this.shots.filter(q => q.kind === 2).length < (this.t > 420 ? 2 : 1)) { const lead = [0, 1, 2, 3][(Math.random() * 4) | 0]; const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
       } else this.flood = -1;
       // storm sweep waves: expanding arc that floods cells (ignores shields beyond base radius)
       for (const w of this.waves) {
@@ -451,12 +461,25 @@
 
       const active = [], trailMax = this.t > 80 ? 22 : this.t > 25 ? 16 : 12;
       for (const p of this.shots) {
-        p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 140 : trailMax)) p.trail.shift();
+        p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 260 : trailMax)) p.trail.shift();
+        if (p.kind === 2) {
+          const rr = clamp(62 + Math.sqrt(p.value / 1e6) * 26, 62, 130);
+          if (!p.brush) { p.brush = 1; p.age = 0; const sp = 3.4; const a = Math.atan2(p.vy, p.vx); p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; }
+          p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt; p.age += dt;
+          if (p.x < rr * .6) { p.x = rr * .6; p.vx = Math.abs(p.vx); } if (p.x > G - rr * .6) { p.x = G - rr * .6; p.vx = -Math.abs(p.vx); }
+          if (p.y < rr * .6) { p.y = rr * .6; p.vy = Math.abs(p.vy); } if (p.y > G - rr * .6) { p.y = G - rr * .6; p.vy = -Math.abs(p.vy); }
+          this.paintSolid(p.x, p.y, p.team, rr * .62);
+          p.value *= Math.pow(.97, dt);
+          if (p.age < 22) active.push(p);
+          continue;
+        }
         p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt;
         if (p.x < -20 || p.y < -20 || p.x > G + 20 || p.y > G + 20) continue;
         if (!this.hitShot(p)) active.push(p);
       }
       this.shots = active;
+      for (const L of this.lasers) L.life -= dt; this.lasers = this.lasers.filter(L => L.life > 0);
+      if (this.t > 200 && Math.random() < dt * .7) { const tt = (Math.random() * 4) | 0; this.lasers.push({ team: tt, a: this.aim[tt] + rand(-.5, .5), life: 2.2 }); }
       this.sparks = this.sparks.filter(s => { s.life -= dt * (s.burst ? .7 : 1.8); return s.life > 0; }).slice(-900);
       for (const s of this.frontierSparks) { s.life -= dt * 1.4; s.x += s.vx * dt; s.y += s.vy * dt; }
       this.frontierSparks = this.frontierSparks.filter(s => s.life > 0);
@@ -465,7 +488,7 @@
       // decorative ribbons (mid-weight trails)
       if (this.frame % 2 === 0 && this.t > 2.5) {
         for (let t = 0; t < 4; t++) {
-          const [bx, by] = BASES[t], a = this.aim[t], n = this.t < 15 ? 6 : this.t < 50 ? 9 : 12;
+          const [bx, by] = BASES[t], a = this.aim[t], n = this.t < 15 ? 6 : this.t < 50 ? 9 : this.t < 200 ? 12 : 6;
           for (let k = 0; k < n; k++) {
             const ang = a + rand(-.32, .32), sp = rand(8, 18);
             this.ribbons.push({ team: t, x: bx + rand(-6, 6), y: by + rand(-6, 6), vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: .7 + Math.random() * .8, trail: [] });
@@ -489,7 +512,7 @@
 
       // dense silk-thread particles (GPU ParticleContainer target)
       {
-        const spawnN = this.t < 2.5 ? 0 : this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : 170;
+        const spawnN = this.t < 2.5 ? 0 : this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : this.t < 200 ? 140 : 35;
         for (let t = 0; t < 4; t++) {
           const [bx, by] = BASES[t], a = this.aim[t];
           const toCenter = Math.atan2(G / 2 - by, G / 2 - bx);
@@ -618,7 +641,7 @@
     for (const m of big) {
       const o = m.path[m.path.length - 1], dx = m.x - o[0], dy = m.y - o[1], L = Math.hypot(dx, dy);
       if (L < 70) continue;
-      { const sp = Math.hypot(m.vx, m.vy) || 1; if ((dx * m.vx + dy * m.vy) / (L * sp) < .8) continue; }
+      { const sp = Math.hypot(m.vx, m.vy) || 1; if ((dx * m.vx + dy * m.vy) / (L * sp) < .55) continue; }
       const k = Math.min(1, 520 / L), sx = m.x - dx * k, sy = m.y - dy * k;
       const gg = c.createLinearGradient(sx, sy, m.x, m.y); gg.addColorStop(0, rgb(TEAMS[m.team].c, 0)); gg.addColorStop(1, rgb(TEAMS[m.team].c, .2));
       c.strokeStyle = gg; c.lineWidth = m.r * 1.7; c.beginPath(); c.moveTo(sx, sy); c.lineTo(m.x, m.y); c.stroke();
@@ -797,6 +820,7 @@
       // bases + meters drawn with Graphics + Text (readable on top)
       this.hud = new PIXI.Container();
       this.root.addChild(this.hud);
+      this.floodG = new PIXI.Graphics(); this.arena.addChild(this.floodG);
       this.baseG = new PIXI.Graphics();
       this.hud.addChild(this.baseG);
       this.baseTexts = [];
@@ -887,10 +911,10 @@
           let hsh = (i * 374761393 + seed * 668265263) | 0; hsh = (hsh ^ (hsh >>> 13)) * 1274126177; const rnd = ((hsh ^ (hsh >>> 16)) >>> 0) / 4294967296;
           if (t < 4) {
             const team = TEAMS[t], tx = this.tex[i], fn = this.foamN[i], h = heat[ci];
-            const thr = 1.1 + fn * 3.4 * (1 - .75 * crisp);               // bubbly rim thickness 0.6–3 cells
+            const thr = (1.1 + fn * 3.4) * (1 - crisp) + (2.4 + fn * 1.2) * crisp;               // bubbly rim thickness 0.6–3 cells
             const dd = dist[ci];
             // dark interior: 18–30% tint + fresh-paint glow that fades (ref: recently swept areas bright)
-            let br = .16 + (t === game.flood ? .22 : .1) * tx + (t === game.flood ? .55 : .5) * h * h;
+            let br = (.16 + (t === game.flood ? .22 : .1) * tx + (t === game.flood ? .55 : .5) * h * h) * (1 - .6 * crisp);
             // fine pixel texture: per-cell checker + 50px grid lines baked in
             const px = (gx + gy) & 1 ? 1 : .9; br *= px;
             let r = team.c[0] * br, g = team.c[1] * br, b = team.c[2] * br, ea = 0;
@@ -900,7 +924,7 @@
               const keep = rnd > (.18 + (1 - fn) * .25) * (1 - .8 * crisp);
               if (keep) {
                 const core = dd === 0 ? 1 : .75;
-                const w = (rnd > .9 && dd === 0) ? 1 : 0;      // white sparkle pixels
+                const w = (rnd > .9 + .09 * crisp && dd === 0) ? 1 : 0;      // white sparkle pixels
                 r = (team.hi[0] * core) * (1 - w) + 255 * w; g = (team.hi[1] * core) * (1 - w) + 255 * w; b = (team.hi[2] * core) * (1 - w) + 255 * w;
                 ea = 120 + 135 * core;
               } else { r *= 1.8; g *= 1.8; b *= 1.8; }
@@ -985,7 +1009,7 @@
         if (len > 1) {
           g.moveTo(p.trail[0][0], p.trail[0][1]);
           for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]);
-          if (p.kind === 2) { const rr = clamp(62 + Math.sqrt(p.value / 1e6) * 26, 62, 130); g.stroke({ width: rr * 1.7, color: team.hex, alpha: 0.32, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
+          if (p.kind === 2) { const rr = clamp(62 + Math.sqrt(p.value / 1e6) * 26, 62, 130); g.stroke({ width: rr * 1.25, color: team.hex, alpha: 0.5, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
           else if (p.kind === 3) g.stroke({ width: 2.4, color: team.hex, alpha: 0.65 });
           else if (age > .45 || p.kind === 4) g.stroke({ width: 1.2, color: 0xffffff, alpha: 0.28 });
           else g.stroke({ width: 1.5, color: 0xffffff, alpha: 0.22 });
@@ -1016,6 +1040,11 @@
         }
         g.arc(bx, by, w.r, w.a - w.half, w.a + w.half).stroke({ width: 10, color: tm.hex, alpha: .35 });
       }
+      for (const L of game.lasers) {
+        const [bx, by] = BASES[L.team], ex = bx + Math.cos(L.a) * 1900, ey = by + Math.sin(L.a) * 1900, al = Math.min(1, L.life);
+        g.moveTo(bx, by).lineTo(ex, ey).stroke({ width: 6, color: TEAMS[L.team].hex, alpha: .18 * al });
+        g.moveTo(bx, by).lineTo(ex, ey).stroke({ width: 1.6, color: TEAMS[L.team].hex, alpha: .95 * al });
+      }
       // main beam per team: coloured energy ribbon from base along aim until it exits own turf + ~reach
       for (let t = 0; t < 4 && game.t > 2.5; t++) {
         const [bx, by] = BASES[t], a = game.aim[t], ca = Math.cos(a), sa = Math.sin(a);
@@ -1037,7 +1066,7 @@
     }
 
     drawBases(game) {
-      const g = this.baseG; g.clear();
+      const g = this.baseG; g.clear(); const fg = this.floodG; fg.clear();
       const corner = [[.12, .12], [.88, .12], [.12, .88], [.88, .88]];
       for (let t = 0; t < 4; t++) {
         const team = TEAMS[t], [ux, uy] = corner[t];
@@ -1045,7 +1074,13 @@
         const grow = clamp((game.t - .6) / 4.5, 0, 1), r = 20 + 72 * grow * grow * (3 - 2 * grow);
         const pulse = Math.sin(game.t * 2.4 + t) * 2.8;
         // outer glow disc
-        if (game.flood === t) { g.circle(x, y, r + 26).fill({ color: team.hex, alpha: .9 }); g.circle(x, y, r + 34).stroke({ width: 8, color: 0xffffff, alpha: .8 }); }
+        if (game.flood === t) {
+          const FR = r + 20 + clamp((game.t - 150) / 200, 0, 1) * 100;
+          fg.circle(x, y, FR + 30).fill({ color: team.hex, alpha: .12 }); fg.circle(x, y, FR + 12).fill({ color: team.hex, alpha: .22 });
+          fg.circle(x, y, FR).fill({ color: team.hex, alpha: .92 });
+          for (const k of [.45, .62, .8, .93]) fg.circle(x, y, FR * k + Math.sin(game.t * 2 + k * 9) * 3).stroke({ width: 2, color: 0xffffff, alpha: .35 });
+          fg.circle(x, y, FR).stroke({ width: 4, color: 0xffffff, alpha: .75 });
+        }
         g.circle(x, y, r + 14).stroke({ width: 22, color: team.hex, alpha: 0.10 }); g.circle(x, y, r + 6).stroke({ width: 10, color: team.hex, alpha: 0.22 });
         g.circle(x, y, r + pulse * .4).stroke({ width: 4, color: team.hex, alpha: 1 }); g.circle(x, y, r + pulse * .4).stroke({ width: 1.2, color: 0xffffff, alpha: .7 });
         g.circle(x, y, r - 8).stroke({ width: 6, color: team.hex, alpha: 0.55 });
