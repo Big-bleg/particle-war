@@ -29,13 +29,13 @@ LEDGE_Y = PTOP + 430                     # ~45% height: multiplier ledge (upper 
 SLOT_H = 52                              # multiplier chute depth below ledge
 ROW_Y = PBOT - 104                       # lower row top: teleport + items
 ROW_H = 84
-GRAVITY = 430.0                          # px/s^2 (slow so viewers can follow)
-VMAX = 400.0                             # px/s clamp
-BALL_R = 14
+GRAVITY = 760.0                          # px/s^2 (slow so viewers can follow)
+VMAX = 620.0                             # px/s clamp
+BALL_R = 9                               # small so exact 1/mult widths fit (16× = 2r+5)
 PAINT_COST = 0.012                       # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
 SUB = 4
-MULTS = [1, 2, 4, 8, 16]
+MULTS = [2, 4, 8, 8, 4, 2]                     # left-right SYMMETRIC ledge
 POWERS = ["护盾", "大球", "散射", "激光"]
 POW_COL = {
     "护盾": (120, 240, 255), "大球": (255, 120, 210),
@@ -147,8 +147,16 @@ class PlinkoLayout:
     """
 
     def __init__(self):
-        widths = np.array([104.0, 82.0, 64.0, 52.0, 44.0])          # 1x..16x
-        gw = np.array([0.55, 1.0, 1.0, 1.0, 1.0, 0.55])
+        # widths ∝ 1/mult → relative 4:2:1:1:2:4 for [2,4,8,8,4,2]
+        # use ~72% of board as openings (tight gaps); 8× still ≥ ball diameter + 5px
+        rel = np.array([8.0 / m for m in MULTS])
+        open_budget = PW * 0.72
+        widths = open_budget * rel / rel.sum()
+        w_floor = 2 * BALL_R + 5
+        if widths.min() < w_floor:
+            widths *= w_floor / widths.min()
+            widths *= open_budget / widths.sum()
+        gw = np.array([1.6, 1.0, 1.0, 1.15, 1.0, 1.0, 1.6])           # remaining ~28% as tight bounce ridges
         gw *= (PW - widths.sum()) / gw.sum()
         self.slots, self.zones = [], []
         x = 0.0
@@ -158,10 +166,10 @@ class PlinkoLayout:
             self.slots.append((m, x, x + widths[i]))
             x += widths[i]
         self.zones.append((x, PW))
-        self.ridge_h = 26.0                                           # LOW ridges
+        self.ridge_h = 7.0                                            # low bumps in the tight gaps
         # angled deflector bars in the upper half (no round pegs)
         self.bars = []
-        for yy, fr, sgn in ((175, (0.30, 0.70), 1), (265, (0.14, 0.50, 0.86), -1), (355, (0.32, 0.68), 1)):
+        for yy, fr, sgn in ((225, (0.36, 0.64), 1), (315, (0.18, 0.50, 0.82), -1), (400, (0.30, 0.70), 1)):
             for k, f in enumerate(fr):
                 s = sgn * (1 if k % 2 == 0 else -1)
                 cx, L, a = f * PW, 74.0, math.radians(17) * s
@@ -169,8 +177,8 @@ class PlinkoLayout:
                                   (cx + L / 2 * math.cos(a), yy + L / 2 * math.sin(a))))
         # sparse lower deflectors
         self.low_bars = []
-        for yy, f, s in ((690, 0.10, 1), (760, 0.62, -1), (820, 0.30, 1)):
-            cx, L, a = f * PW, 64.0, math.radians(14) * s
+        for yy, f, s in ((650, 0.22, 1), (650, 0.78, -1), (735, 0.50, 1), (815, 0.16, -1), (815, 0.84, 1)):
+            cx, L, a = f * PW, 84.0, math.radians(22) * s
             self.low_bars.append(((cx - L / 2 * math.cos(a), yy - L / 2 * math.sin(a)),
                                   (cx + L / 2 * math.cos(a), yy + L / 2 * math.sin(a))))
         # bottom row: teleport bigger share, items split the rest
@@ -198,9 +206,14 @@ class PlinkoLayout:
         if key is None:
             return None
         if key.startswith("M"):
-            for m, a, b in self.slots:
-                if m == int(key[1:]):
-                    return (a + b) / 2
+            raw, side = key[1:], "L"
+            if raw.endswith("R") or raw.endswith("L"):
+                side, raw = raw[-1], raw[:-1]
+            want = int(raw)
+            matches = [(a + b) / 2 for m, a, b in self.slots if m == want]
+            if not matches:
+                return None
+            return matches[-1] if side == "R" else matches[0]
         if key == "TELE":
             return (self.tele[0] + self.tele[1]) / 2
         for name, a, b in self.items:
@@ -212,7 +225,7 @@ class PlinkoLayout:
 # ---------------------------------------------------------------- Marbles + Pymunk Plinko
 class Marble:
     __slots__ = ("t", "x", "y", "vx", "vy", "mult", "r", "alive", "state",
-                 "hit_mult", "script_tag", "_force", "body", "shape", "age")
+                 "hit_mult", "script_tag", "_force", "body", "shape", "age", "_still")
 
     def __init__(self, t, x, y, vx=0.0, vy=0.0, mult=1, tag=""):
         self.t = t
@@ -233,10 +246,10 @@ def build_plinko_space(layout: PlinkoLayout):
     """Pymunk space for the LEFT board only (y+ down = screen)."""
     space = pymunk.Space()
     space.gravity = (0, GRAVITY)
-    space.damping = 0.85              # velocity *= 0.85 per second → slower, followable
+    space.damping = 0.93              # light air drag; motion mostly from gravity + contacts
     st = space.static_body
 
-    def seg(a, b, r=3.0, e=0.80, mu=0.35):
+    def seg(a, b, r=3.0, e=0.62, mu=0.45):
         s = pymunk.Segment(st, a, b, r)
         s.elasticity, s.friction = e, mu
         space.add(s)
@@ -249,20 +262,18 @@ def build_plinko_space(layout: PlinkoLayout):
     n = len(layout.zones)
     for i, (a, b) in enumerate(layout.zones):          # bounce-back ridges (low)
         if i == 0:
-            seg((a, LEDGE_Y - h * 1.5), (b, LEDGE_Y), 4.0, 0.85)
+            seg((a, LEDGE_Y - h * 1.5), (b, LEDGE_Y), 4.0, 0.62)
         elif i == n - 1:
-            seg((a, LEDGE_Y), (b, LEDGE_Y - h * 1.5), 4.0, 0.85)
+            seg((a, LEDGE_Y), (b, LEDGE_Y - h * 1.5), 4.0, 0.62)
         else:
             mid = (a + b) / 2
-            seg((a, LEDGE_Y), (mid, LEDGE_Y - h), 4.0, 0.85)
-            seg((mid, LEDGE_Y - h), (b, LEDGE_Y), 4.0, 0.85)
+            seg((a, LEDGE_Y), (mid, LEDGE_Y - h), 4.0, 0.62)
+            seg((mid, LEDGE_Y - h), (b, LEDGE_Y), 4.0, 0.62)
     for _, a, b in layout.slots:                        # multiplier chute walls
         seg((a, LEDGE_Y), (a, LEDGE_Y + SLOT_H), 3.0)
         seg((b, LEDGE_Y), (b, LEDGE_Y + SLOT_H), 3.0)
-    for x in layout.row_div:                            # item-row shallow ridges + dividers
-        seg((x - 34, ROW_Y), (x, ROW_Y - 16), 3.5, 0.85)
-        seg((x, ROW_Y - 16), (x + 34, ROW_Y), 3.5, 0.85)
-        seg((x, ROW_Y - 16), (x, ROW_Y + ROW_H), 2.5)
+    for x in layout.row_div:                            # bottom row: FLAT dividers only (no slopes)
+        seg((x, ROW_Y), (x, ROW_Y + ROW_H), 2.5)
     seg((0, ROW_Y + ROW_H), (PW, ROW_Y + ROW_H), 4.0)  # floor
     return space
 
@@ -290,7 +301,7 @@ class Demo:
             math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
             for t in range(nt)
         ], dtype=np.float64)
-        self.spin = 0.030             # unified sweep speed (same for all guns)
+        self.spin = 0.045             # unified clockwise spin rad/frame (~4.6 s per turn)
         self.fire_cd = np.zeros(nt, int)
         self.fire_period = 14         # slow unified fire rate (~2.1/s)
         # team state (NO levels)
@@ -332,13 +343,13 @@ class Demo:
         # force targets: "M2","M4","M8","TELE","护盾","大球","散射","激光"
         # force = "UPPER|LOWER": upper multiplier target | lower cell target
         plan = [
-            (0,   0, 1, -0.5, "red_tele",    "M2|TELE"),   # 2x → teleport → stacks
-            (6,   1, 1,  0.4, "blu_sh1",     "M4|护盾"),
-            (12,  2, 1, -0.2, "grn_laser",   "M8|激光"),
-            (18,  3, 1,  0.6, "gld_big",     "M1|大球"),
-            (34,  1, 1, -0.3, "blu_sh2",     "M2|护盾"),   # 2nd shield → additive stack
-            (52,  3, 1,  0.2, "gld_m16",     "M16|散射"),
-            (70,  1, 1,  0.3, "blu_sh3",     "M1|护盾"),   # 3rd shield stack
+            (0,   0, 1, -0.5, "red_tele",    "M2|TELE"),     # left 2× → teleport stack
+            (6,   1, 1,  0.4, "blu_sh1",     "M4|护盾"),     # left 4×
+            (12,  2, 1, -0.2, "grn_laser",   "M8|激光"),     # left 8×
+            (18,  3, 1,  0.6, "gld_big",     "M2R|大球"),    # right 2×
+            (34,  1, 1, -0.3, "blu_sh2",     "M2|护盾"),     # 2nd shield stack
+            (52,  3, 1,  0.2, "gld_scatter", "M8R|散射"),    # right 8×
+            (70,  1, 1,  0.3, "blu_sh3",     "M4R|护盾"),    # 3rd shield via right 4×
             (250, 0, 1,  0.2, "post0", None),
             (254, 1, 1, -0.2, "post1", None),
             (258, 2, 1,  0.1, "post2", None),
@@ -361,8 +372,8 @@ class Demo:
         # velocities are ~px/frame historically; convert to px/s
         body.velocity = (vx * FPS, vy * FPS)
         shape = pymunk.Circle(body, m.r)
-        shape.elasticity = 0.80
-        shape.friction = 0.40
+        shape.elasticity = 0.72
+        shape.friction = 0.50
         shape.collision_type = 2
         self.space.add(body, shape)
         m.body, m.shape = body, shape
@@ -402,25 +413,21 @@ class Demo:
         m.vx, m.vy = float(m.body.velocity.x) / FPS, float(m.body.velocity.y) / FPS
 
     def _steer(self, m):
-        """Demo-only guidance so every mechanic shows inside 10s (physics still Pymunk)."""
+        """Demo-only: a weak sideways FORCE toward the scripted target (no velocity overwrite),
+        so motion stays physical. Rescue only if a ball is genuinely stuck."""
         up, low = self._split_force(m._force)
-        b = m.body
-        vx, vy = b.velocity
         key = up if not m.hit_mult else low
+        b = m.body
         if key:
             tx = self.layout.target_x(key)
-            zone_ok = (m.y > LAYER1_Y + 60) if not m.hit_mult else (m.y > LEDGE_Y + SLOT_H)
-            if zone_ok:
-                want = float(np.clip((tx - m.x) * 1.4, -170, 170))
-                vx = vx + (want - vx) * 0.06          # gentle lateral guidance
-            if m.age > 20 and m.y > LAYER1_Y + 50 and math.hypot(vx, vy) < 25:   # resting on bar/ridge → kick
-                vx, vy = 130.0 * np.sign(tx - m.x + 1e-3), -140.0
-            if not m.hit_mult and m.age > 62 and m.y < LEDGE_Y - 30:
-                b.position = (tx, max(m.y, LEDGE_Y - 120)); vx, vy = 0.0, 60.0
-            if m.hit_mult and m.age > 50 and m.y < ROW_Y - 50:
-                b.position = (tx, max(m.y, ROW_Y - 130)); vx, vy = 0.0, 80.0
-            b.velocity = (vx, vy)
+            ok = (m.y > LAYER1_Y + 80) if not m.hit_mult else (m.y > LEDGE_Y + SLOT_H)
+            if ok:
+                fx = float(np.clip((tx - m.x) * 1.2, -150.0, 150.0))
+                b.apply_force_at_local_point((fx, 0), (0, 0))
         sp = math.hypot(*b.velocity)
+        m._still = (getattr(m, "_still", 0) + 1) if sp < 8 else 0
+        if m._still > 25:                       # wedged: small physical nudge
+            b.apply_impulse_at_local_point((self.rng.uniform(-60, 60), -90), (0, 0)); m._still = 0
         if sp > VMAX:
             b.velocity = (b.velocity[0] * VMAX / sp, b.velocity[1] * VMAX / sp)
 
@@ -769,11 +776,7 @@ class Demo:
                 bx, by = self.bases[t]
                 self.ang[t] = math.atan2(self.boss["y"] - by, self.boss["x"] - bx)
             else:
-                # fixed-speed sweep across the inward arc (corner bases never waste shots off-map)
-                c0 = math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
-                ph = (self.f * self.spin) % 4.0
-                tri = ph - 1.0 if ph < 2.0 else 3.0 - ph          # -1..1 triangle wave
-                self.ang[t] = c0 + 0.70 * tri
+                self.ang[t] = (self.ang[t] + self.spin) % (2 * math.pi)   # continuous CLOCKWISE (screen y-down)
             # slow fire (after brief warmup)
             if self.f >= 40:
                 self.fire_team(t, ev)
@@ -899,14 +902,13 @@ def build_static_bg(layout: PlinkoLayout, nt):
             poly = [(X(a), LEDGE_Y), (X((a + b) / 2), LEDGE_Y - h), (X(b), LEDGE_Y)]
         d.polygon(poly + [(poly[-1][0], LEDGE_Y + SLOT_H), (poly[0][0], LEDGE_Y + SLOT_H)], fill=(34, 40, 78))
         d.line(poly, fill=(150, 185, 255), width=4)
-        ctext(d, X((a + b) / 2), LEDGE_Y + 12, "↑", font(20), (110, 140, 220), 1)
-    # multiplier openings (bigger = narrower)
+            # multiplier openings (bigger = narrower)
     for mult, a, b in layout.slots:
         col = MC[mult]
         d.rectangle((X(a), LEDGE_Y, X(b), LEDGE_Y + SLOT_H), fill=(26 + mult * 3, 26, 52))
         d.line([(X(a), LEDGE_Y - 4), (X(a), LEDGE_Y + SLOT_H)], fill=col, width=3)
         d.line([(X(b), LEDGE_Y - 4), (X(b), LEDGE_Y + SLOT_H)], fill=col, width=3)
-        ctext(d, X((a + b) / 2), LEDGE_Y + 10, f"{mult}×", font(24 if mult < 8 else 19), col, 2)
+        ctext(d, X((a + b) / 2), LEDGE_Y + 10, f"{mult}×", font({2: 24, 4: 20, 8: 14}.get(mult, 16)), col, 1 if mult >= 8 else 2)
     ctext(d, (PX0 + PX1) / 2, LEDGE_Y + SLOT_H + 10, "▼ 下层：传送 / 道具", font(16), (120, 140, 190), 1)
     # bottom row: teleport (bigger) + 4 items
     ta, tb = layout.tele
@@ -919,8 +921,6 @@ def build_static_bg(layout: PlinkoLayout, nt):
         d.rounded_rectangle((X(a) + 3, ROW_Y, X(b) - 3, ROW_Y + ROW_H), 8,
                             fill=(32, 24, 56), outline=col, width=2)
         ctext(d, X((a + b) / 2), ROW_Y + 26, name, font(22), col, 2)
-    for x in layout.row_div:   # shallow bounce ridges on dividers
-        d.line([(X(x - 34), ROW_Y), (X(x), ROW_Y - 16), (X(x + 34), ROW_Y)], fill=(185, 205, 255), width=4)
 
     # map frame
     d.rectangle((MX - 5, MY - 5, MX + G + 4, MY + G + 4), outline=(70, 230, 255), width=2)
@@ -1005,7 +1005,7 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             c = TEAMS[m.t][1]
             d.ellipse((X - m.r, Y - m.r, X + m.r, Y + m.r), fill=c, outline=(255, 255, 255), width=2)
             # number = multiplier (does NOT drift while falling)
-            ctext(d, X, Y - 9, str(int(m.mult)), font(16), (255, 255, 255), 2)
+            ctext(d, X, Y - 8, str(int(m.mult)), font(12), (255, 255, 255), 2)
 
         # spawn marker top center
         cx = PX0 + PW / 2
