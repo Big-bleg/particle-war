@@ -7,7 +7,7 @@
   中心 Boss、停转对 Boss、按伤害分 8 倍奖池到左侧球倍率.
   无等级 / 无加速冰冻 / 无解说语音 / 无白钉点 / 无右侧技能条幅.
   无阶段系统（无发育/扩张/混战/决战）；唯一事件标记「Boss 来袭」.
-  左侧倍率区碰撞: Pymunk (Segment 斜面 + Circle 球, e≈0.8); 右侧涂色仍为 numpy.
+  左侧倍率碰撞: Pymunk (Segment 斜面 + Circle 球, e≈0.8); 右侧涂色仍为 numpy.
 """
 from __future__ import annotations
 import math, os, subprocess, wave, time, argparse
@@ -29,10 +29,13 @@ LEDGE_Y = PTOP + 430                     # ~45% height: multiplier ledge (upper 
 SLOT_H = 52                              # multiplier chute depth below ledge
 ROW_Y = PBOT - 104                       # lower row top: teleport + items
 ROW_H = 84
-GRAVITY = 760.0                          # px/s^2 (slow so viewers can follow)
-VMAX = 620.0                             # px/s clamp
+GRAVITY = 420.0                          # px/s^2 — followable (slower than prior 760)
+VMAX = 300.0                             # px/s clamp — slow cap
 BALL_R = 9                               # small so exact 1/mult widths fit (16× = 2r+5)
-PAINT_COST = 0.012                       # number lost per enemy pixel painted (real-time decay)
+PAINT_COST = 0.012
+PROT_R = G / 8.0                        # protected circle radius around each base (~1/8 map)
+OPEN_AIM_F = int(2.4 * FPS)              # opening: all guns aim center + spray, then clockwise
+                       # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
 SUB = 4
 MULTS = [2, 4, 8, 8, 4, 2]                     # left-right SYMMETRIC ledge
@@ -139,10 +142,10 @@ class PlinkoLayout:
     """Vertical ladder board.
 
     Upper half: angled deflector bars (busy area) then the multiplier ledge.
-      Between multiplier openings sit BOUNCE-BACK zones (背离区): low, shallow ridges
+      Between multiplier openings sit bounce ridges under 「倍率」: low, shallow ridges
       that kick a ball back UP toward the top. Bigger multiplier = narrower opening.
-    Lower half: sparse deflectors, then ONE row: teleport (bigger share) + 4 items.
-      Shallow ridges sit on the row dividers so balls bounce; item cells are not pinched.
+    Lower half: sparse deflectors + white pegs, then ONE row:
+      4 items | TELE(~⅔ center) | 4 items (each powerup twice). Flat dividers only.
     All coords are plinko-local x (0..PW) and screen y.
     """
 
@@ -167,7 +170,7 @@ class PlinkoLayout:
             x += widths[i]
         self.zones.append((x, PW))
         self.ridge_h = 7.0                                            # low bumps in the tight gaps
-        # angled deflector bars in the upper half (no round pegs)
+        # angled deflector bars in the upper half (plus separate white pegs)
         self.bars = []
         for yy, fr, sgn in ((225, (0.36, 0.64), 1), (315, (0.18, 0.50, 0.82), -1), (400, (0.30, 0.70), 1)):
             for k, f in enumerate(fr):
@@ -181,12 +184,28 @@ class PlinkoLayout:
             cx, L, a = f * PW, 84.0, math.radians(22) * s
             self.low_bars.append(((cx - L / 2 * math.cos(a), yy - L / 2 * math.sin(a)),
                                   (cx + L / 2 * math.cos(a), yy + L / 2 * math.sin(a))))
-        # bottom row: teleport bigger share, items split the rest
-        tw = PW * 0.42
-        iw = (PW - tw) / len(POWERS)
-        self.tele = (0.0, tw)
-        self.items = [(POWERS[i], tw + i * iw, tw + (i + 1) * iw) for i in range(len(POWERS))]
-        self.row_div = [tw + i * iw for i in range(len(POWERS))]     # boundaries (tele|i0, i0|i1, ...)
+        # denser white-dot pegs (static Circles) in UPPER + LOWER regions
+        self.pegs = []; self.peg_r = 5.0
+        rngp = np.random.default_rng(42)
+        for row, y in enumerate(range(int(LAYER1_Y + 50), int(LEDGE_Y - 50), 36)):
+            n = 10 if row % 2 == 0 else 9
+            for x in np.linspace(24, PW - 24, n):
+                self.pegs.append((float(x + rngp.uniform(-5, 5)), float(y + rngp.uniform(-4, 4))))
+        for row, y in enumerate(range(int(LEDGE_Y + SLOT_H + 36), int(ROW_Y - 28), 40)):
+            n = 9 if row % 2 == 0 else 8
+            for x in np.linspace(28, PW - 28, n):
+                self.pegs.append((float(x + rngp.uniform(-5, 5)), float(y + rngp.uniform(-4, 4))))
+        # bottom row: 4 small items | CENTER teleport (~2/3) | 4 small items
+        # each of 护盾/大球/散射/激光 appears twice (L and R); flat dividers only
+        tw = PW * (2.0 / 3.0)
+        side = (PW - tw) / 2.0
+        iw = side / 4.0
+        self.tele = ((PW - tw) / 2.0, (PW + tw) / 2.0)
+        left = [(POWERS[i], i * iw, (i + 1) * iw) for i in range(4)]
+        right = [(POWERS[i], self.tele[1] + i * iw, self.tele[1] + (i + 1) * iw) for i in range(4)]
+        self.items = left + right
+        self.row_div = [iw, 2*iw, 3*iw, side,
+                        self.tele[1], self.tele[1]+iw, self.tele[1]+2*iw, self.tele[1]+3*iw]
 
     def slot_at(self, x):
         for m, a, b in self.slots:
@@ -246,7 +265,7 @@ def build_plinko_space(layout: PlinkoLayout):
     """Pymunk space for the LEFT board only (y+ down = screen)."""
     space = pymunk.Space()
     space.gravity = (0, GRAVITY)
-    space.damping = 0.93              # light air drag; motion mostly from gravity + contacts
+    space.damping = 0.80              # drag → followable fall/bounce
     st = space.static_body
 
     def seg(a, b, r=3.0, e=0.62, mu=0.45):
@@ -256,8 +275,15 @@ def build_plinko_space(layout: PlinkoLayout):
 
     seg((2, PTOP), (2, PBOT), 4)                        # side walls
     seg((PW - 2, PTOP), (PW - 2, PBOT), 4)
+    seg((2, PTOP + 6), (PW - 2, PTOP + 6), 3.0)        # soft ceiling for fountain arcs
     for a, b in layout.bars + layout.low_bars:         # angled deflectors
         seg(a, b, 4.0)
+    for (px, py) in layout.pegs:
+        body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        body.position = (px, py)
+        sh = pymunk.Circle(body, layout.peg_r)
+        sh.elasticity, sh.friction = 0.70, 0.40
+        space.add(body, sh)
     h = layout.ridge_h
     n = len(layout.zones)
     for i, (a, b) in enumerate(layout.zones):          # bounce-back ridges (low)
@@ -295,15 +321,16 @@ class Demo:
         self.layout = PlinkoLayout()
         self.space = build_plinko_space(self.layout)  # LEFT physics
         self.bases = corner_bases(nt, G)
-        self.grid = voronoi_grid(self.bases, G, self.rng)
+        self.grid = np.full((G, G), self.nt, np.int8)   # FULLY NEUTRAL start (no pre-colored territories)
         # single barrel angle per team (radians), rotating outward until Boss
         self.ang = np.array([
             math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
             for t in range(nt)
         ], dtype=np.float64)
-        self.spin = 0.045             # unified clockwise spin rad/frame (~4.6 s per turn)
+        self.spin = 0.042             # unified clockwise spin rad/frame after opening
         self.fire_cd = np.zeros(nt, int)
-        self.fire_period = 14         # slow unified fire rate (~2.1/s)
+        self.fire_period = 2          # dense particle stream (~15 jets/s)
+        self.fire_period_pow = 16     # power-up: one big numbered ball, slower
         # team state (NO levels)
         self.mult_bonus = np.ones(nt, int)   # from boss rewards, applied to marbles
         self.shield = np.zeros(nt, int)      # frames remaining
@@ -336,6 +363,7 @@ class Demo:
         self.share = np.zeros(nt)
         self._script_done = set()
         self._spawn_plan = self._build_spawn_plan()
+        self.tip("开局集火中央 · 随后顺时针旋转", (200, 220, 255), 70)
 
     def _build_spawn_plan(self):
         """Scripted marble spawns so every mechanic appears in ~10s."""
@@ -343,13 +371,13 @@ class Demo:
         # force targets: "M2","M4","M8","TELE","护盾","大球","散射","激光"
         # force = "UPPER|LOWER": upper multiplier target | lower cell target
         plan = [
-            (0,   0, 1, -0.5, "red_tele",    "M2|TELE"),     # left 2× → teleport stack
-            (6,   1, 1,  0.4, "blu_sh1",     "M4|护盾"),     # left 4×
-            (12,  2, 1, -0.2, "grn_laser",   "M8|激光"),     # left 8×
-            (18,  3, 1,  0.6, "gld_big",     "M2R|大球"),    # right 2×
-            (34,  1, 1, -0.3, "blu_sh2",     "M2|护盾"),     # 2nd shield stack
-            (52,  3, 1,  0.2, "gld_scatter", "M8R|散射"),    # right 8×
-            (70,  1, 1,  0.3, "blu_sh3",     "M4R|护盾"),    # 3rd shield via right 4×
+            (0,   0, 1, -0.4, "red_tele",    "M2|TELE"),
+            (4,   1, 1,  0.35, "blu_sh1",    "M4|护盾"),
+            (8,   2, 1, -0.2, "grn_laser",   "M8|激光"),
+            (12,  3, 1,  0.5, "gld_big",     "M2R|大球"),
+            (28,  1, 1, -0.25, "blu_sh2",    "M2|护盾"),
+            (40,  3, 1,  0.2, "gld_scatter", "M8R|散射"),
+            (55,  1, 1,  0.3, "blu_sh3",     "M4R|护盾"),
             (250, 0, 1,  0.2, "post0", None),
             (254, 1, 1, -0.2, "post1", None),
             (258, 2, 1,  0.1, "post2", None),
@@ -391,11 +419,17 @@ class Demo:
             m.body = m.shape = None
 
     def spawn_marble(self, t, mult=1, vx=0.0, tag="", force=None):
-        # All teams from TOP CENTER (fair)
-        cx = PW / 2 + self.rng.uniform(-6, 6)
-        m = Marble(t, cx, LAYER1_Y, vx, 0.3, mult, tag)
+        # TOP CENTER fountain launch: upward arc + small horizontal spread, then free-fall into pegs
+        # (also used for teleport returns)
+        cx = PW / 2 + self.rng.uniform(-10, 10)
+        # start a bit below the ceiling so the upward kick has room to peak
+        sy = LAYER1_Y + 55 + self.rng.uniform(-8, 8)
+        # vx: launch bias + random spray; vy negative = UP (screen y+)
+        launch_vx = vx * 0.35 + self.rng.uniform(-2.8, 2.8)
+        launch_vy = self.rng.uniform(-5.2, -3.4)          # upward kick (px/frame)
+        m = Marble(t, cx, sy, launch_vx, launch_vy, mult, tag)
         m._force = force
-        self._attach_body(m, vx + self.rng.uniform(-0.1, 0.1), 0.3)
+        self._attach_body(m, launch_vx, launch_vy)
         self.marbles.append(m)
         return m
 
@@ -413,21 +447,26 @@ class Demo:
         m.vx, m.vy = float(m.body.velocity.x) / FPS, float(m.body.velocity.y) / FPS
 
     def _steer(self, m):
-        """Demo-only: a weak sideways FORCE toward the scripted target (no velocity overwrite),
-        so motion stays physical. Rescue only if a ball is genuinely stuck."""
+        """Demo-only weak sideways force + age rescue so 10s still shows every mechanic."""
         up, low = self._split_force(m._force)
         key = up if not m.hit_mult else low
         b = m.body
         if key:
             tx = self.layout.target_x(key)
-            ok = (m.y > LAYER1_Y + 80) if not m.hit_mult else (m.y > LEDGE_Y + SLOT_H)
+            # let fountain arc play out before demo steering
+            ok = (m.age > 28 and m.y > LAYER1_Y + 90) if not m.hit_mult else (m.y > LEDGE_Y + SLOT_H)
             if ok:
-                fx = float(np.clip((tx - m.x) * 1.2, -150.0, 150.0))
+                fx = float(np.clip((tx - m.x) * 1.1, -120.0, 120.0))
                 b.apply_force_at_local_point((fx, 0), (0, 0))
+            # age rescue: drop INTO the target opening (once), not above the ledge
+            if (not m.hit_mult) and m.age == 110:
+                b.position = (tx, LEDGE_Y + SLOT_H * 0.45); b.velocity = (0, 40)
+            elif m.hit_mult and m.age == 75 and m.y < ROW_Y:
+                b.position = (tx, ROW_Y + ROW_H * 0.35); b.velocity = (0, 20)
         sp = math.hypot(*b.velocity)
-        m._still = (getattr(m, "_still", 0) + 1) if sp < 8 else 0
-        if m._still > 25:                       # wedged: small physical nudge
-            b.apply_impulse_at_local_point((self.rng.uniform(-60, 60), -90), (0, 0)); m._still = 0
+        m._still = (getattr(m, "_still", 0) + 1) if sp < 10 else 0
+        if m._still > 28:
+            b.apply_impulse_at_local_point((self.rng.uniform(-80, 80), -70), (0, 0)); m._still = 0
         if sp > VMAX:
             b.velocity = (b.velocity[0] * VMAX / sp, b.velocity[1] * VMAX / sp)
 
@@ -516,7 +555,6 @@ class Demo:
     def fire_team(self, t, ev):
         if self.fire_cd[t] > 0:
             return
-        self.fire_cd[t] = self.fire_period
         bx, by = self.bases[t]
         ang = self.ang[t]
         name = self.power[t]
@@ -529,33 +567,33 @@ class Demo:
         else:
             base_num = 40.0 * mult_vis   # normal shot: paints but shows no number
             kind = 0
-        # ONE barrel only
-        n_shot = 1
-        spread = 0.0
-        if name == "散射" and self.power_t[t] > 0:
-            n_shot = 3
-            spread = 0.22
-        speed = 5.0
-        energy = base_num
-        r0 = 28.0
-        if name == "大球" and self.power_t[t] > 0:
-            r0 = 34.0
-            speed = 4.0
+        powered = bool(name and self.power_t[t] > 0)
+        if powered:
+            # ONE big numbered ball (number drains only on foreign color)
+            self.fire_cd[t] = self.fire_period_pow
+            speed = 2.6 if name == "大球" else 3.2
+            energy = base_num; r0 = 40.0; n_shot = 1; spread = 0.0; kind = 2
+        else:
+            # dense jet of SMALL particles (reference look)
+            self.fire_cd[t] = self.fire_period
+            speed = 5.5; energy = 8.0; r0 = 30.0; n_shot = 10; spread = 0.10; kind = 0
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
-            a = ang + (k - (n_shot - 1) / 2) * spread
+            a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
+            jitter = 0.0 if powered else self.rng.uniform(-0.04, 0.04)
+            a += jitter
+            sp = speed * (1.0 if powered else self.rng.uniform(0.85, 1.15))
             self.px[i] = bx + math.cos(a) * r0
             self.py[i] = by + math.sin(a) * r0
-            self.pvx[i] = math.cos(a) * speed
-            self.pvy[i] = math.sin(a) * speed
+            self.pvx[i] = math.cos(a) * sp
+            self.pvy[i] = math.sin(a) * sp
             self.ptm[i] = t
-            self.pval[i] = energy / n_shot
-            self.pbase[i] = energy / n_shot
+            self.pval[i] = energy if powered else energy
+            self.pbase[i] = self.pval[i]
             self.palive[i] = True
             self.pkind[i] = kind
-            self.ppow[i] = bool(name and self.power_t[t] > 0)   # only power-up shots carry a number
-        if name == "激光" and self.power_t[t] > 0:
-            # also paint a short beam toward aim; number shown via a fat projectile
+            self.ppow[i] = powered
+        if name == "激光" and powered:
             self._laser_beam(t, ang, base_num)
             ev.append(("laser", t))
 
@@ -584,8 +622,11 @@ class Demo:
                         remaining -= dmg
                         self._float_boss(t, dmg)
                         continue
-                    if o != t and o < self.nt:
-                        # shield block near enemy base
+                    if o == self.nt:
+                        self.grid[y2, x2] = t  # neutral free — no number decrease
+                        self.fx[y2, x2] = np.maximum(self.fx[y2, x2],
+                            np.array(TEAMS[t][1], np.float32) * 0.8)
+                    elif o < self.nt and o != t:
                         if self.shield[o] > 0:
                             dxb = x2 - self.bases[o, 0]; dyb = y2 - self.bases[o, 1]
                             if dxb * dxb + dyb * dyb < 55 * 55:
@@ -593,11 +634,9 @@ class Demo:
                                 remaining -= 0.5
                                 continue
                         self.grid[y2, x2] = t
-                        remaining -= PAINT_COST
+                        remaining -= PAINT_COST  # ONLY other-team paints decrease number
                         self.fx[y2, x2] = np.maximum(self.fx[y2, x2],
                             np.array(TEAMS[t][1], np.float32) * 0.8)
-                    elif o == t:
-                        pass
 
     def tick_projectiles(self):
         boss_on = self.boss is not None and self.boss["hp"] > 0
@@ -610,7 +649,7 @@ class Demo:
                 self.palive[i] = False
                 continue
             # radius scales with remaining number
-            rad = max(3.0, 4.0 + 9.0 * (val0 / max(1.0, self.pbase[i])))   # brush shrinks with number
+            rad = (max(7.0, 9.0 + 11.0 * (val0 / max(1.0, self.pbase[i]))) if self.ppow[i] else 2.6)
             if self.pkind[i] == 2:  # big
                 rad *= 1.6
             for _ in range(SUB):
@@ -637,13 +676,27 @@ class Demo:
                             self._float_boss(t, dmg)
                             painted += 1
                             continue
-                        if o != t and o < self.nt:
-                            if self.shield[o] > 0:
-                                dxb = xx - self.bases[o, 0]; dyb = yy - self.bases[o, 1]
-                                if dxb * dxb + dyb * dyb < 55 * 55:
-                                    self.shield_hp[o] = max(0, int(self.shield_hp[o] - 1))
-                                    self.pval[i] -= 0.4
-                                    continue
+                        if o == self.nt:
+                            # neutral: free claim unless inside another team's protected circle
+                            blocked = False
+                            for ob in range(self.nt):
+                                if ob == t: continue
+                                dxb = xx - self.bases[ob, 0]; dyb = yy - self.bases[ob, 1]
+                                if dxb * dxb + dyb * dyb < PROT_R * PROT_R:
+                                    blocked = True; break
+                            if blocked:
+                                continue
+                            self.grid[yy, xx] = t
+                            painted += 1
+                        elif o < self.nt and o != t:
+                            # OTHER team color: paint AND decrease number (skip protected base circle)
+                            dxb = xx - self.bases[o, 0]; dyb = yy - self.bases[o, 1]
+                            if dxb * dxb + dyb * dyb < PROT_R * PROT_R:
+                                continue
+                            if self.shield[o] > 0 and dxb * dxb + dyb * dyb < 55 * 55:
+                                self.shield_hp[o] = max(0, int(self.shield_hp[o] - 1))
+                                self.pval[i] -= 0.4
+                                continue
                             self.grid[yy, xx] = t
                             self.pval[i] -= PAINT_COST
                             painted += 1
@@ -655,7 +708,7 @@ class Demo:
                     self.fx[iy, ix] = np.maximum(
                         self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
                 # mild energy drain even on own color so shots end
-                self.pval[i] -= 0.012
+                self.pval[i] -= 0.008
                 if self.pval[i] <= 0:
                     self.palive[i] = False
                     break
@@ -769,16 +822,19 @@ class Demo:
         self.tick_marbles(ev)
 
         boss_on = self.boss is not None and self.boss["hp"] > 0
-        # aim / spin: ONE barrel per team
+        # aim / spin: opening = all aim CENTER and spray; then clockwise full circle; Boss locks aim
         for t in range(self.nt):
+            bx, by = self.bases[t]
             if boss_on:
-                # stop rotating; aim at boss center
-                bx, by = self.bases[t]
                 self.ang[t] = math.atan2(self.boss["y"] - by, self.boss["x"] - bx)
+            elif self.f < OPEN_AIM_F:
+                self.ang[t] = math.atan2(G / 2 - by, G / 2 - bx)   # opening clash at center
             else:
-                self.ang[t] = (self.ang[t] + self.spin) % (2 * math.pi)   # continuous CLOCKWISE (screen y-down)
-            # slow fire (after brief warmup)
-            if self.f >= 40:
+                if self.f == OPEN_AIM_F:
+                    # seed clockwise from current center-aim angle
+                    self.ang[t] = math.atan2(G / 2 - by, G / 2 - bx)
+                self.ang[t] = (self.ang[t] + self.spin) % (2 * math.pi)
+            if self.f >= 8:   # almost immediate dense spray
                 self.fire_team(t, ev)
 
         self.tick_projectiles()
@@ -886,12 +942,16 @@ def build_static_bg(layout: PlinkoLayout, nt):
     X = lambda x: PX0 + x
     # upper half tint = bounce-back area
     d.rounded_rectangle((PX0 + 6, PTOP + 26, PX1 - 6, LEDGE_Y + SLOT_H + 4), 10, fill=(16, 20, 44))
-    ctext(d, X(PW * 0.12), PTOP + 32, "背离区 ↑", font(16), (130, 170, 255), 1)
-    # angled deflector bars (no round pegs)
+    ctext(d, X(PW * 0.12), PTOP + 32, "倍率", font(18), (130, 170, 255), 1)
+    # angled deflector bars
     for (a, b) in layout.bars + layout.low_bars:
         d.line([(X(a[0]), a[1]), (X(b[0]), b[1])], fill=(120, 150, 230), width=8)
         d.line([(X(a[0]), a[1]), (X(b[0]), b[1])], fill=(185, 205, 255), width=2)
-    # bounce-back ridges (low, shallow) between multiplier openings
+    # white-dot pegs (upper + lower)
+    pr = layout.peg_r
+    for px, py in layout.pegs:
+        d.ellipse((X(px) - pr, py - pr, X(px) + pr, py + pr), fill=(235, 238, 255), outline=(150, 165, 210))
+    # bounce ridges between 「倍率」 openings
     h = layout.ridge_h; nz = len(layout.zones)
     for i, (a, b) in enumerate(layout.zones):
         if i == 0:
@@ -909,18 +969,18 @@ def build_static_bg(layout: PlinkoLayout, nt):
         d.line([(X(a), LEDGE_Y - 4), (X(a), LEDGE_Y + SLOT_H)], fill=col, width=3)
         d.line([(X(b), LEDGE_Y - 4), (X(b), LEDGE_Y + SLOT_H)], fill=col, width=3)
         ctext(d, X((a + b) / 2), LEDGE_Y + 10, f"{mult}×", font({2: 24, 4: 20, 8: 14}.get(mult, 16)), col, 1 if mult >= 8 else 2)
-    ctext(d, (PX0 + PX1) / 2, LEDGE_Y + SLOT_H + 10, "▼ 下层：传送 / 道具", font(16), (120, 140, 190), 1)
-    # bottom row: teleport (bigger) + 4 items
+    ctext(d, (PX0 + PX1) / 2, LEDGE_Y + SLOT_H + 10, "▼ 下层：四道具 | 传送(居中⅔) | 四道具", font(16), (120, 140, 190), 1)
+    # bottom row: 4 small | CENTER teleport (~⅔) | 4 small
     ta, tb = layout.tele
-    d.rounded_rectangle((X(ta) + 6, ROW_Y, X(tb) - 2, ROW_Y + ROW_H), 8,
-                        fill=(22, 30, 70), outline=(110, 150, 255), width=3)
-    ctext(d, X((ta + tb) / 2), ROW_Y + 10, "传送区", font(26), (150, 190, 255), 2)
-    ctext(d, X((ta + tb) / 2), ROW_Y + 46, "带倍率回顶 · 叠加", font(16), (130, 160, 230), 1)
     for name, a, b in layout.items:
         col = POW_COL[name]
-        d.rounded_rectangle((X(a) + 3, ROW_Y, X(b) - 3, ROW_Y + ROW_H), 8,
+        d.rounded_rectangle((X(a) + 1, ROW_Y, X(b) - 1, ROW_Y + ROW_H), 5,
                             fill=(32, 24, 56), outline=col, width=2)
-        ctext(d, X((a + b) / 2), ROW_Y + 26, name, font(22), col, 2)
+        ctext(d, X((a + b) / 2), ROW_Y + 32, name, font(12), col, 1)
+    d.rounded_rectangle((X(ta) + 4, ROW_Y, X(tb) - 4, ROW_Y + ROW_H), 8,
+                        fill=(22, 30, 70), outline=(110, 150, 255), width=3)
+    ctext(d, X((ta + tb) / 2), ROW_Y + 10, "传送", font(28), (150, 190, 255), 2)
+    ctext(d, X((ta + tb) / 2), ROW_Y + 46, "居中 · 约占⅔ · 带倍率回顶", font(15), (130, 160, 230), 1)
 
     # map frame
     d.rectangle((MX - 5, MY - 5, MX + G + 4, MY + G + 4), outline=(70, 230, 255), width=2)
@@ -1012,11 +1072,18 @@ def render(out_path, preview_prefix, seed=5, nt=4):
         d.polygon([(cx - 12, LAYER1_Y - 8), (cx + 12, LAYER1_Y - 8), (cx, LAYER1_Y + 6)],
                   fill=(200, 220, 255))
 
-        # ---- bases: ONE barrel each ----
+        # ---- bases: ONE barrel each + protected circle (r ≈ map/8) ----
         for t in range(nt):
             bx, by = demo.bases[t]
             X, Y = MX + bx, MY + by
             c = TEAMS[t][1]
+            # semi-transparent protected zone
+            pr = PROT_R
+            zone = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            zd = ImageDraw.Draw(zone)
+            zd.ellipse((X - pr, Y - pr, X + pr, Y + pr), fill=(*c, 45), outline=(255, 255, 255, 90), width=2)
+            im = Image.alpha_composite(im.convert("RGBA"), zone).convert("RGB")
+            d = ImageDraw.Draw(im)
             # base disk
             br = 22
             d.ellipse((X - br, Y - br, X + br, Y + br), fill=c, outline=(255, 255, 255), width=2)
@@ -1048,16 +1115,19 @@ def render(out_path, preview_prefix, seed=5, nt=4):
                 continue
             X = MX + demo.px[i]; Y = MY + demo.py[i]
             frac = val / max(1e-3, demo.pbase[i])
-            rad = max(3.5, 5.0 + 10.0 * frac) if demo.ppow[i] else 4.5   # normal bullets: small, no number
-            if demo.pkind[i] == 2:
-                rad *= 1.55
-            c = TEAMS[t][1]
-            d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c, outline=(255, 255, 255), width=2)
             if demo.ppow[i]:
-                # power-up shot: number decays + shrinks in real time
+                rad = max(9.0, 11.0 + 12.0 * frac)
+                if demo.pkind[i] == 2: rad *= 1.15
+                c = TEAMS[t][1]
+                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c, outline=(255, 255, 255), width=2)
                 num_s = str(int(max(1, round(val))))
-                fs = 13 if rad < 8 else 17
+                fs = 14 if rad < 10 else 18
                 ctext(d, X, Y - fs * 0.55, num_s, font(fs), (255, 255, 255), 2)
+            else:
+                # dense small particle jet
+                rad = 2.2
+                c = TEAMS[t][1]
+                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c)
 
         # ---- boss ----
         if demo.boss is not None:
