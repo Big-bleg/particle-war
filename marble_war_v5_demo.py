@@ -55,6 +55,11 @@ DEMO_SEC = 10.0
 DEMO_F = int(DEMO_SEC * FPS)             # 300
 
 
+class V_TITLE:
+    t = "粒子领地大战 v5 · 机制演示"
+    sub = "机制演示 · 无阶段 · 慢节奏"
+
+
 # ---------------------------------------------------------------- helpers
 _fc = {}
 def font(sz):
@@ -379,6 +384,8 @@ class Demo:
         self.fx = np.zeros((G, G, 3), np.float32)
         self.share = np.zeros(nt)
         self._script_done = set()
+        self.boss_f = 165          # Boss 来袭 frame
+        self.boss_force_f = 245    # demo-only guaranteed kill (-1 = natural)
         self._spawn_plan = self._build_spawn_plan()
         self.tip("开局集火中央 · 随后顺时针旋转", (200, 220, 255), 70)
 
@@ -691,7 +698,7 @@ class Demo:
             # other power-ups: one numbered ball at a time (not a spray)
             self.fire_cd[t] = self.fire_period_pow
             speed = 3.4
-            energy = base_num; r0 = 38.0; n_shot = 1; spread = 0.0; kind = 2
+            energy = base_num; r0 = 38.0; n_shot = 1; spread = 0.0; kind = 1  # medium numbered ball (only 大球 is huge)
         else:
             # normal: slower + denser small-particle jet
             self.fire_cd[t] = self.fire_period
@@ -969,10 +976,10 @@ class Demo:
                 self.power[t] = None
 
         # scripted world events
-        if self.f == 165 and self.boss is None:
+        if self.f == self.boss_f and self.boss is None:
             self.spawn_boss(ev)
         # ensure boss dies by ~7.5s if still up: inject damage
-        if self.boss and self.f == 245:
+        if self.boss and self.f == self.boss_force_f:
             # guarantee kill ~7.2s; damage share favors red/green for visible reward split
             need = max(0.0, self.boss["maxhp"] - float(self.boss_dmg.sum()) + 50)
             weights = np.array([0.35, 0.20, 0.28, 0.17], dtype=np.float64)[:self.nt]
@@ -1147,13 +1154,14 @@ def build_static_bg(layout: PlinkoLayout, nt):
 
     # title bar
     d.rounded_rectangle((MX, 8, MX + G, MY - 12), 10, fill=(14, 18, 40), outline=(60, 120, 200), width=1)
-    ctext(d, MX + G / 2, 14, "粒子领地大战 v5 · 机制演示", font(28), (200, 230, 255), 2)
+    ctext(d, MX + G / 2, 14, getattr(V_TITLE, "t", "粒子领地大战 v5 · 机制演示"), font(28), (200, 230, 255), 2)
 
     return bg
 
 
-def render(out_path, preview_prefix, seed=5, nt=4):
-    demo = Demo(seed=seed, nt=nt)
+def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=None,
+           post_draw=None, log_every=30):
+    demo = demo if demo is not None else Demo(seed=seed, nt=nt)
     layout = demo.layout
     names = [n for n, _ in TEAMS[:nt]]
     pal = np.array([c for _, c in TEAMS[:nt]] + [NEU, BOSS_C, VOID], np.uint8)
@@ -1166,12 +1174,12 @@ def render(out_path, preview_prefix, seed=5, nt=4):
     proc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
-         "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
          "-pix_fmt", "yuv420p", "-movflags", "+faststart", tmp],
         stdin=subprocess.PIPE,
     )
     frames_ev = []
-    snap_at = {40: "00", 75: "01", 110: "02", 140: "03", 180: "04", 215: "05", 255: "06", 290: "07"}
+    snap_at = snap_at if snap_at is not None else {40: "00", 75: "01", 110: "02", 140: "03", 180: "04", 215: "05", 255: "06", 290: "07"}
     t0 = time.time()
 
     for fi in range(demo.maxf):
@@ -1348,10 +1356,12 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             overlay = Image.new("RGBA", (W, H), (0, 0, 0, 140))
             od = ImageDraw.Draw(overlay)
             ctext(od, W / 2, H / 2 - 40, "粒子领地大战 v5", font(54), (200, 230, 255), 3)
-            ctext(od, W / 2, H / 2 + 30, "机制演示 · 无阶段 · 慢节奏", font(28), (180, 200, 240), 2)
+            ctext(od, W / 2, H / 2 + 30, V_TITLE.sub, font(28), (180, 200, 240), 2)
             im = Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB")
             d = ImageDraw.Draw(im)
 
+        if post_draw is not None:
+            im = post_draw(demo, im, fi) or im
         rgb = np.asarray(im)
         proc.stdin.write(rgb.tobytes())
 
@@ -1359,7 +1369,7 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             im.save(f"{preview_prefix}_{snap_at[fi]}.png")
             print(f"  preview {preview_prefix}_{snap_at[fi]}.png @ {fi / FPS:.1f}s", flush=True)
 
-        if fi % 30 == 0:
+        if fi % log_every == 0:
             print(f"  frame {fi}/{demo.maxf} ({fi/FPS:.1f}s)  {(time.time()-t0):.1f}s elapsed", flush=True)
 
     proc.stdin.close()
