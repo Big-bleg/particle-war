@@ -24,14 +24,15 @@ PX0 = TIP_X0 + TIP_W + 10                # plinko left
 PX1 = MX - 14                            # plinko right
 PTOP, PBOT = 92, H - 28
 PW = PX1 - PX0                           # plinko width
-LAYER1_Y = PTOP + 28                     # upper layer start
-SLOT1_Y = PTOP + 340                     # multiplier slot band top
-SLOT1_H = 56
-LAYER2_Y = SLOT1_Y + SLOT1_H + 18        # lower layer
-TELE_H = 70
-POW_Y = LAYER2_Y + TELE_H + 12
-POW_H = 64
+LAYER1_Y = PTOP + 34                     # spawn height (top center)
+LEDGE_Y = PTOP + 430                     # ~45% height: multiplier ledge (upper half = bounce-back zones)
+SLOT_H = 52                              # multiplier chute depth below ledge
+ROW_Y = PBOT - 104                       # lower row top: teleport + items
+ROW_H = 84
+GRAVITY = 430.0                          # px/s^2 (slow so viewers can follow)
+VMAX = 400.0                             # px/s clamp
 BALL_R = 14
+PAINT_COST = 0.012                       # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
 SUB = 4
 MULTS = [1, 2, 4, 8, 16]
@@ -135,57 +136,49 @@ def voronoi_grid(bases, g, rng):
 
 # ---------------------------------------------------------------- Plinko layout (shared)
 class PlinkoLayout:
-    """Upper multiplier slots with pyramid slopes + lower teleport + powerups."""
+    """Vertical ladder board.
+
+    Upper half: angled deflector bars (busy area) then the multiplier ledge.
+      Between multiplier openings sit BOUNCE-BACK zones (背离区): low, shallow ridges
+      that kick a ball back UP toward the top. Bigger multiplier = narrower opening.
+    Lower half: sparse deflectors, then ONE row: teleport (bigger share) + 4 items.
+      Shallow ridges sit on the row dividers so balls bounce; item cells are not pinched.
+    All coords are plinko-local x (0..PW) and screen y.
+    """
 
     def __init__(self):
-        # Inverse-width weights: larger mult → narrower
-        inv = np.array([1.0 / m for m in MULTS], dtype=np.float64)
-        # Leave ~38% of width for pyramid gaps; enforce min widths so labels fit
-        gap_frac = 0.38
-        usable = PW * (1.0 - gap_frac)
-        widths = usable * inv / inv.sum()
-        mins = np.array([72.0, 56.0, 44.0, 36.0, 32.0])
-        widths = np.maximum(widths, mins)
-        widths *= usable / widths.sum()
-        # 4 gaps between 5 slots, equal-ish but slightly wider toward center
-        gap_budget = PW - widths.sum()
-        n_gaps = len(MULTS) - 1
-        gap_w = np.array([1.0, 1.25, 1.25, 1.0]); gap_w *= gap_budget / gap_w.sum()
-        edges = [0.0]
-        slots = []
+        widths = np.array([104.0, 82.0, 64.0, 52.0, 44.0])          # 1x..16x
+        gw = np.array([0.55, 1.0, 1.0, 1.0, 1.0, 0.55])
+        gw *= (PW - widths.sum()) / gw.sum()
+        self.slots, self.zones = [], []
         x = 0.0
         for i, m in enumerate(MULTS):
-            x0 = x
-            x1 = x + widths[i]
-            slots.append((m, x0, x1))
-            edges.append(x1)
-            if i < n_gaps:
-                x = x1 + gap_w[i]
-                edges.append(x)
-            else:
-                x = x1
-        self.slots = slots          # (mult, x0, x1) in plinko-local coords
-        self.gap_ws = gap_w
-        # Pyramid peaks sit mid-gap, tip near SLOT1_Y - 120
-        self.pyramids = []
-        x = 0.0
-        for i in range(n_gaps):
-            # after slot i
-            left = slots[i][2]
-            right = slots[i + 1][1]
-            mid = (left + right) / 2
-            tip_y = SLOT1_Y - 130 - (20 if i in (1, 2) else 0)
-            base_y = SLOT1_Y + 4
-            self.pyramids.append({
-                "mid": mid, "left": left, "right": right,
-                "tip_y": tip_y, "base_y": base_y,
-            })
-        # Powerup slots equal width after teleport
-        pw = PW / len(POWERS)
-        self.powers = [(POWERS[i], i * pw, (i + 1) * pw) for i in range(len(POWERS))]
-        # Teleport is full-width blank band
-        self.tele_y0 = LAYER2_Y
-        self.tele_y1 = LAYER2_Y + TELE_H
+            self.zones.append((x, x + gw[i]))
+            x += gw[i]
+            self.slots.append((m, x, x + widths[i]))
+            x += widths[i]
+        self.zones.append((x, PW))
+        self.ridge_h = 26.0                                           # LOW ridges
+        # angled deflector bars in the upper half (no round pegs)
+        self.bars = []
+        for yy, fr, sgn in ((175, (0.30, 0.70), 1), (265, (0.14, 0.50, 0.86), -1), (355, (0.32, 0.68), 1)):
+            for k, f in enumerate(fr):
+                s = sgn * (1 if k % 2 == 0 else -1)
+                cx, L, a = f * PW, 74.0, math.radians(17) * s
+                self.bars.append(((cx - L / 2 * math.cos(a), yy - L / 2 * math.sin(a)),
+                                  (cx + L / 2 * math.cos(a), yy + L / 2 * math.sin(a))))
+        # sparse lower deflectors
+        self.low_bars = []
+        for yy, f, s in ((690, 0.10, 1), (760, 0.62, -1), (820, 0.30, 1)):
+            cx, L, a = f * PW, 64.0, math.radians(14) * s
+            self.low_bars.append(((cx - L / 2 * math.cos(a), yy - L / 2 * math.sin(a)),
+                                  (cx + L / 2 * math.cos(a), yy + L / 2 * math.sin(a))))
+        # bottom row: teleport bigger share, items split the rest
+        tw = PW * 0.42
+        iw = (PW - tw) / len(POWERS)
+        self.tele = (0.0, tw)
+        self.items = [(POWERS[i], tw + i * iw, tw + (i + 1) * iw) for i in range(len(POWERS))]
+        self.row_div = [tw + i * iw for i in range(len(POWERS))]     # boundaries (tele|i0, i0|i1, ...)
 
     def slot_at(self, x):
         for m, a, b in self.slots:
@@ -193,17 +186,33 @@ class PlinkoLayout:
                 return m
         return None
 
-    def power_at(self, x):
-        for name, a, b in self.powers:
+    def cell_at(self, x):
+        if self.tele[0] <= x < self.tele[1]:
+            return "TELE"
+        for name, a, b in self.items:
             if a <= x <= b:
                 return name
+        return None
+
+    def target_x(self, key):
+        if key is None:
+            return None
+        if key.startswith("M"):
+            for m, a, b in self.slots:
+                if m == int(key[1:]):
+                    return (a + b) / 2
+        if key == "TELE":
+            return (self.tele[0] + self.tele[1]) / 2
+        for name, a, b in self.items:
+            if name == key:
+                return (a + b) / 2
         return None
 
 
 # ---------------------------------------------------------------- Marbles + Pymunk Plinko
 class Marble:
     __slots__ = ("t", "x", "y", "vx", "vy", "mult", "r", "alive", "state",
-                 "hit_mult", "script_tag", "_force", "body", "shape")
+                 "hit_mult", "script_tag", "_force", "body", "shape", "age")
 
     def __init__(self, t, x, y, vx=0.0, vy=0.0, mult=1, tag=""):
         self.t = t
@@ -217,54 +226,44 @@ class Marble:
         self.script_tag = tag
         self.body = None
         self.shape = None
+        self.age = 0
 
 
 def build_plinko_space(layout: PlinkoLayout):
-    """Pymunk space for LEFT plinko only. Y+ down to match screen coords."""
+    """Pymunk space for the LEFT board only (y+ down = screen)."""
     space = pymunk.Space()
-    space.gravity = (0, 1400)          # px/s^2 downward
-    space.damping = 0.99
-    # shared material: elasticity ~0.8, modest friction for energy loss on bounce
-    E, MU = 0.80, 0.35
-    static = space.static_body
+    space.gravity = (0, GRAVITY)
+    space.damping = 0.85              # velocity *= 0.85 per second → slower, followable
+    st = space.static_body
 
-    def seg(a, b, radius=3.0):
-        s = pymunk.Segment(static, a, b, radius)
-        s.elasticity = E
-        s.friction = MU
-        s.collision_type = 1
+    def seg(a, b, r=3.0, e=0.80, mu=0.35):
+        s = pymunk.Segment(st, a, b, r)
+        s.elasticity, s.friction = e, mu
         space.add(s)
-        return s
 
-    # Side walls (full height of plinko)
-    seg((2, PTOP), (2, PBOT), 4.0)
-    seg((PW - 2, PTOP), (PW - 2, PBOT), 4.0)
-
-    # Pyramid slopes as Segments (angled dividers)
-    for pyr in layout.pyramids:
-        mid, left, right = pyr["mid"], pyr["left"], pyr["right"]
-        tip_y, base_y = pyr["tip_y"], pyr["base_y"]
-        # left & right sharp faces
-        seg((left, base_y), (mid, tip_y), 3.5)
-        seg((right, base_y), (mid, tip_y), 3.5)
-        # short base cap so balls don't sink into the tip wedge
-        seg((left, base_y), (right, base_y), 4.0)
-
-    # First-layer bottom ledge (WIDER collision) between multiplier openings
-    ledge_y = SLOT1_Y + SLOT1_H * 0.55
-    ledge_r = 7.0  # wider collision volume
-    # build solid spans: from 0 to first slot, between slots, after last slot
-    xs = [0.0]
-    for _, a, b in layout.slots:
-        xs.append(a); xs.append(b)
-    xs.append(PW)
-    for i in range(0, len(xs) - 1, 2):
-        x0, x1 = xs[i], xs[i + 1]
-        if x1 - x0 > 4:
-            seg((x0, ledge_y), (x1, ledge_y), ledge_r)
-
-    # Soft catcher under power row so balls don't fall forever
-    seg((0, PBOT - 4), (PW, PBOT - 4), 3.0)
+    seg((2, PTOP), (2, PBOT), 4)                        # side walls
+    seg((PW - 2, PTOP), (PW - 2, PBOT), 4)
+    for a, b in layout.bars + layout.low_bars:         # angled deflectors
+        seg(a, b, 4.0)
+    h = layout.ridge_h
+    n = len(layout.zones)
+    for i, (a, b) in enumerate(layout.zones):          # bounce-back ridges (low)
+        if i == 0:
+            seg((a, LEDGE_Y - h * 1.5), (b, LEDGE_Y), 4.0, 0.85)
+        elif i == n - 1:
+            seg((a, LEDGE_Y), (b, LEDGE_Y - h * 1.5), 4.0, 0.85)
+        else:
+            mid = (a + b) / 2
+            seg((a, LEDGE_Y), (mid, LEDGE_Y - h), 4.0, 0.85)
+            seg((mid, LEDGE_Y - h), (b, LEDGE_Y), 4.0, 0.85)
+    for _, a, b in layout.slots:                        # multiplier chute walls
+        seg((a, LEDGE_Y), (a, LEDGE_Y + SLOT_H), 3.0)
+        seg((b, LEDGE_Y), (b, LEDGE_Y + SLOT_H), 3.0)
+    for x in layout.row_div:                            # item-row shallow ridges + dividers
+        seg((x - 34, ROW_Y), (x, ROW_Y - 16), 3.5, 0.85)
+        seg((x, ROW_Y - 16), (x + 34, ROW_Y), 3.5, 0.85)
+        seg((x, ROW_Y - 16), (x, ROW_Y + ROW_H), 2.5)
+    seg((0, ROW_Y + ROW_H), (PW, ROW_Y + ROW_H), 4.0)  # floor
     return space
 
 
@@ -291,13 +290,14 @@ class Demo:
             math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
             for t in range(nt)
         ], dtype=np.float64)
-        self.spin = 0.035             # unified slow spin rad/frame
+        self.spin = 0.030             # unified sweep speed (same for all guns)
         self.fire_cd = np.zeros(nt, int)
         self.fire_period = 14         # slow unified fire rate (~2.1/s)
         # team state (NO levels)
         self.mult_bonus = np.ones(nt, int)   # from boss rewards, applied to marbles
         self.shield = np.zeros(nt, int)      # frames remaining
-        self.shield_hp = np.zeros(nt, int)   # displayed number on shield
+        self.shield_hp = np.zeros(nt, int)   # displayed number on shield (stacks additively)
+        self.shield_pop = np.zeros(nt, int)  # pop animation timer on stack
         self.power = [None] * nt             # active power name
         self.power_t = np.zeros(nt, int)
         self.power_val = np.ones(nt, float)  # base effect value before marble mult
@@ -308,7 +308,7 @@ class Demo:
         z = lambda dt=float: np.zeros(NMAX, dt)
         self.px = z(); self.py = z(); self.pvx = z(); self.pvy = z()
         self.ptm = z(np.int8); self.pval = z(); self.pbase = z()
-        self.palive = z(bool); self.pkind = z(np.int8)  # 0 normal 1 scatter 2 big 3 laser-dot
+        self.palive = z(bool); self.ppow = z(bool); self.pkind = z(np.int8)  # 0 normal 1 scatter 2 big 3 laser-dot
         self.pcur = 0
         # boss
         self.boss = None                 # dict or None
@@ -330,23 +330,21 @@ class Demo:
         """Scripted marble spawns so every mechanic appears in ~10s."""
         # (frame, team, mult, vx, tag, force_slot_or_None)
         # force targets: "M2","M4","M8","TELE","护盾","大球","散射","激光"
+        # force = "UPPER|LOWER": upper multiplier target | lower cell target
         plan = [
-            (8,   0, 1, -0.6, "red_m2", "M2"),
-            (14,  1, 1,  0.4, "blu_m4", "M4"),
-            (20,  2, 1, -0.2, "grn_m8", "M8"),
-            (26,  3, 1,  0.8, "gld_m1", "M1"),
-            (55,  0, 2,  0.3, "red_tele", "TELE"),   # after red hit 2x, teleport stack
-            (70,  1, 4, -0.5, "blu_shield", "护盾"),
-            (85,  2, 8,  0.2, "grn_laser", "激光"),
-            (95,  3, 1, -0.3, "gld_big", "大球"),
-            (110, 0, 2,  0.5, "red_scatter", "散射"),
-            (130, 1, 4, -0.4, "blu_m16", "M16"),
-            # post-boss reward visibility: drop fresh marbles late
+            (0,   0, 1, -0.5, "red_tele",    "M2|TELE"),   # 2x → teleport → stacks
+            (6,   1, 1,  0.4, "blu_sh1",     "M4|护盾"),
+            (12,  2, 1, -0.2, "grn_laser",   "M8|激光"),
+            (18,  3, 1,  0.6, "gld_big",     "M1|大球"),
+            (34,  1, 1, -0.3, "blu_sh2",     "M2|护盾"),   # 2nd shield → additive stack
+            (52,  3, 1,  0.2, "gld_m16",     "M16|散射"),
+            (70,  1, 1,  0.3, "blu_sh3",     "M1|护盾"),   # 3rd shield stack
             (250, 0, 1,  0.2, "post0", None),
-            (255, 1, 1, -0.2, "post1", None),
-            (260, 2, 1,  0.1, "post2", None),
-            (265, 3, 1, -0.1, "post3", None),
+            (254, 1, 1, -0.2, "post1", None),
+            (258, 2, 1,  0.1, "post2", None),
+            (262, 3, 1, -0.1, "post3", None),
         ]
+        self.tele_next = {"red_tele": "M4|散射"}
         return plan
 
     def tip(self, text, col, life=55):
@@ -383,30 +381,19 @@ class Demo:
 
     def spawn_marble(self, t, mult=1, vx=0.0, tag="", force=None):
         # All teams from TOP CENTER (fair)
-        cx = PW / 2 + self.rng.uniform(-8, 8)
-        m = Marble(t, cx, LAYER1_Y + 6, vx, 0.4, mult, tag)
-        m._force = force  # scripted destination bias
-        self._attach_body(m, vx + self.rng.uniform(-0.15, 0.15), 0.4)
+        cx = PW / 2 + self.rng.uniform(-6, 6)
+        m = Marble(t, cx, LAYER1_Y, vx, 0.3, mult, tag)
+        m._force = force
+        self._attach_body(m, vx + self.rng.uniform(-0.1, 0.1), 0.3)
         self.marbles.append(m)
         return m
 
-    def _force_target_x(self, force):
-        if force is None:
-            return None
-        if force.startswith("M"):
-            try:
-                want = int(force[1:])
-            except ValueError:
-                return None
-            for mult, a, b in self.layout.slots:
-                if mult == want:
-                    return (a + b) / 2
-        if force == "TELE":
-            return PW * 0.22
-        for name, a, b in self.layout.powers:
-            if name == force:
-                return (a + b) / 2
-        return None
+    @staticmethod
+    def _split_force(force):
+        if not force:
+            return None, None
+        up, _, low = force.partition("|")
+        return (up or None), (low or None)
 
     def _sync_from_body(self, m):
         if m.body is None:
@@ -414,114 +401,80 @@ class Demo:
         m.x, m.y = float(m.body.position.x), float(m.body.position.y)
         m.vx, m.vy = float(m.body.velocity.x) / FPS, float(m.body.velocity.y) / FPS
 
+    def _steer(self, m):
+        """Demo-only guidance so every mechanic shows inside 10s (physics still Pymunk)."""
+        up, low = self._split_force(m._force)
+        b = m.body
+        vx, vy = b.velocity
+        key = up if not m.hit_mult else low
+        if key:
+            tx = self.layout.target_x(key)
+            zone_ok = (m.y > LAYER1_Y + 60) if not m.hit_mult else (m.y > LEDGE_Y + SLOT_H)
+            if zone_ok:
+                want = float(np.clip((tx - m.x) * 1.4, -170, 170))
+                vx = vx + (want - vx) * 0.06          # gentle lateral guidance
+            if m.age > 20 and m.y > LAYER1_Y + 50 and math.hypot(vx, vy) < 25:   # resting on bar/ridge → kick
+                vx, vy = 130.0 * np.sign(tx - m.x + 1e-3), -140.0
+            if not m.hit_mult and m.age > 62 and m.y < LEDGE_Y - 30:
+                b.position = (tx, max(m.y, LEDGE_Y - 120)); vx, vy = 0.0, 60.0
+            if m.hit_mult and m.age > 50 and m.y < ROW_Y - 50:
+                b.position = (tx, max(m.y, ROW_Y - 130)); vx, vy = 0.0, 80.0
+            b.velocity = (vx, vy)
+        sp = math.hypot(*b.velocity)
+        if sp > VMAX:
+            b.velocity = (b.velocity[0] * VMAX / sp, b.velocity[1] * VMAX / sp)
+
     def tick_marbles(self, ev):
-        # spawn scripted
         for fr, t, mult, vx, tag, force in self._spawn_plan:
             if self.f == fr and tag not in self._script_done:
                 mm = max(1, int(mult) * int(self.mult_bonus[t]))
-                if self.boss_rewards is not None and fr >= 250:
-                    mm = max(1, int(self.mult_bonus[t]))
-                m = self.spawn_marble(t, mm, vx, tag, force)
+                self.spawn_marble(t, mm, vx, tag, force)
                 self._script_done.add(tag)
-                name = TEAMS[t][0]
-                if force == "TELE":
-                    self.tip(f"{name} 倍率叠传送", TEAMS[t][1], 50)
-                elif force in POW_COL:
-                    self.tip(f"{name} 瞄准{force}", TEAMS[t][1], 50)
 
-        # scripted steering as lateral impulse (demo reliability), then step Pymunk
         for m in self.marbles:
-            if not m.alive or m.state != "fall" or m.body is None:
-                continue
-            tx = self._force_target_x(getattr(m, "_force", None))
-            if tx is not None:
-                force = getattr(m, "_force", "") or ""
-                strength = 0.0
-                if m.y < SLOT1_Y - 10 and force.startswith("M"):
-                    strength = 280.0
-                elif m.y >= LAYER2_Y and force == "TELE":
-                    strength = 320.0
-                elif m.y >= POW_Y and force in POW_COL:
-                    strength = 360.0
-                if strength:
-                    m.body.apply_force_at_local_point((strength * np.sign(tx - m.x), 0), (0, 0))
-            # clamp runaway speeds (px/s)
-            vx, vy = m.body.velocity
-            sp = math.hypot(vx, vy)
-            if sp > 900:
-                m.body.velocity = (vx * 900 / sp, vy * 900 / sp)
+            if m.alive and m.state == "fall" and m.body is not None:
+                m.age += 1
+                self._steer(m)
 
-        # Step pymunk once per render frame (substeps for stability)
         dt = 1.0 / FPS
         for _ in range(4):
             self.space.step(dt / 4)
 
-        # Sync draw positions from physics; game-logic triggers (slots / tele / power)
+        L = self.layout
         for m in self.marbles:
             if not m.alive or m.state != "fall":
                 continue
             self._sync_from_body(m)
-
-            # multiplier slot: number changes ONLY here (not while falling)
-            if (not m.hit_mult) and SLOT1_Y - 4 <= m.y <= SLOT1_Y + SLOT1_H + 12:
-                force = getattr(m, "_force", None) or ""
-                # demo steer: if scripted toward Mx, soft-snap into that opening
-                if force.startswith("M") and m.body is not None:
-                    tx = self._force_target_x(force)
-                    if tx is not None:
-                        m.body.position = (tx, min(m.y, SLOT1_Y + SLOT1_H * 0.5))
-                        m.body.velocity = (0, abs(float(m.body.velocity.y)) + 40)
-                        self._sync_from_body(m)
-                sm = self.layout.slot_at(m.x)
+            # multiplier: number changes ONLY when passing a multiplier opening (stacks on teleport base)
+            if not m.hit_mult and m.y > LEDGE_Y + 6:
+                sm = L.slot_at(m.x)
                 if sm is not None:
-                    m.mult = int(sm)
+                    before = m.mult
+                    m.mult = int(before * sm)
                     m.hit_mult = True
+                    m.age = 0
                     ev.append(("mult", m.t, sm))
-                    self.tip(f"{TEAMS[m.t][0]} 命中 {sm}×", TEAMS[m.t][1], 45)
-
-            # teleport zone
-            if self.layout.tele_y0 <= m.y <= self.layout.tele_y1:
-                force = getattr(m, "_force", None)
-                if force == "TELE" or (force is None and m.hit_mult and self.rng.random() < 0.02):
-                    stacked = m.mult
-                    self._detach_body(m)
-                    m.alive = False
-                    nm = self.spawn_marble(m.t, stacked, self.rng.uniform(-0.5, 0.5),
-                                           tag=m.script_tag + "_re", force="M4")
-                    nm.mult = stacked
-                    ev.append(("tele", m.t, stacked))
-                    self.tip(f"{TEAMS[m.t][0]} 传送叠 {stacked}×", TEAMS[m.t][1], 55)
-                    continue
-                if force in POW_COL and m.body is not None:
-                    # nudge past tele band without removing body
-                    m.body.position = (m.x, self.layout.tele_y1 + 4)
-                    self._sync_from_body(m)
-
-            # powerup slots
-            if POW_Y <= m.y <= POW_Y + POW_H + 12:
-                pname = self.layout.power_at(m.x)
-                force = getattr(m, "_force", None)
-                if force in POW_COL:
-                    pname = force
-                if pname:
-                    self.apply_power(m.t, pname, m.mult, ev)
-                    self._detach_body(m)
-                    m.alive = False
-                    m.state = "done"
-                    continue
-            if m.y > PBOT - 2:
+                    txt = f"{TEAMS[m.t][0]} 命中 {sm}×" + (f" ({before}→{m.mult})" if before > 1 else "")
+                    self.tip(txt, TEAMS[m.t][1], 50)
+            # bottom row: teleport or item
+            if m.y >= ROW_Y + 8:
+                up, low = self._split_force(m._force)
+                cell = low if (low and m.hit_mult) else L.cell_at(m.x)
                 self._detach_body(m)
-                m.alive = False
-                m.state = "done"
+                m.alive = False; m.state = "done"
+                if cell == "TELE":
+                    nxt = self.tele_next.get(m.script_tag, "M2|大球")
+                    self.spawn_marble(m.t, m.mult, self.rng.uniform(-0.4, 0.4),
+                                      tag=m.script_tag + "_re", force=nxt)
+                    ev.append(("tele", m.t, m.mult))
+                    self.tip(f"{TEAMS[m.t][0]} 传送 · 带{m.mult}×回顶", TEAMS[m.t][1], 60)
+                elif cell in POW_COL:
+                    self.apply_power(m.t, cell, m.mult, ev)
+                continue
+            if m.y > PBOT:
+                self._detach_body(m); m.alive = False; m.state = "done"
 
-        # prune dead (bodies already detached)
-        keep = []
-        for m in self.marbles:
-            if m.alive or m.state == "done":
-                keep.append(m)
-            else:
-                self._detach_body(m)
-        self.marbles = keep[-40:]
+        self.marbles = [m for m in self.marbles if m.alive][-40:]
 
     def apply_power(self, t, name, mult, ev):
         # power effect value = marble mult × base (no upgrades)
@@ -531,8 +484,11 @@ class Demo:
         self.power_t[t] = int(4.5 * FPS)
         self.power_val[t] = float(val)
         if name == "护盾":
-            self.shield[t] = int(5 * FPS)
-            self.shield_hp[t] = max(self.shield_hp[t], val)
+            before = int(self.shield_hp[t])
+            self.shield[t] = max(int(self.shield[t]), int(8 * FPS))
+            self.shield_hp[t] = before + val          # ADDITIVE stacking
+            self.shield_pop[t] = 24
+            self.tip(f"{TEAMS[t][0]} 护盾 {before}+{val}={before + val}", TEAMS[t][1], 70)
         ev.append(("skill", t, name))
         self.tip(f"{TEAMS[t][0]} 获得{name} {val}", TEAMS[t][1], 60)
         self.banner = (f"{TEAMS[t][0]} · {name} ×{mult}", TEAMS[t][1], 40)
@@ -564,7 +520,7 @@ class Demo:
             base_num = float(self.power_val[t])
             kind = {"散射": 1, "大球": 2, "激光": 3, "护盾": 0}.get(name, 0)
         else:
-            base_num = 6.0 * mult_vis
+            base_num = 40.0 * mult_vis   # normal shot: paints but shows no number
             kind = 0
         # ONE barrel only
         n_shot = 1
@@ -572,12 +528,12 @@ class Demo:
         if name == "散射" and self.power_t[t] > 0:
             n_shot = 3
             spread = 0.22
-        speed = 2.4
+        speed = 5.0
         energy = base_num
         r0 = 28.0
         if name == "大球" and self.power_t[t] > 0:
             r0 = 34.0
-            speed = 1.9
+            speed = 4.0
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
             a = ang + (k - (n_shot - 1) / 2) * spread
@@ -590,6 +546,7 @@ class Demo:
             self.pbase[i] = energy / n_shot
             self.palive[i] = True
             self.pkind[i] = kind
+            self.ppow[i] = bool(name and self.power_t[t] > 0)   # only power-up shots carry a number
         if name == "激光" and self.power_t[t] > 0:
             # also paint a short beam toward aim; number shown via a fat projectile
             self._laser_beam(t, ang, base_num)
@@ -629,7 +586,7 @@ class Demo:
                                 remaining -= 0.5
                                 continue
                         self.grid[y2, x2] = t
-                        remaining -= 1.0
+                        remaining -= PAINT_COST
                         self.fx[y2, x2] = np.maximum(self.fx[y2, x2],
                             np.array(TEAMS[t][1], np.float32) * 0.8)
                     elif o == t:
@@ -646,16 +603,17 @@ class Demo:
                 self.palive[i] = False
                 continue
             # radius scales with remaining number
-            rad = max(1.2, 2.2 + 4.5 * (val0 / max(1.0, self.pbase[i])))
+            rad = max(3.0, 4.0 + 9.0 * (val0 / max(1.0, self.pbase[i])))   # brush shrinks with number
             if self.pkind[i] == 2:  # big
                 rad *= 1.6
             for _ in range(SUB):
                 self.px[i] += self.pvx[i] / SUB
                 self.py[i] += self.pvy[i] / SUB
                 x, y = self.px[i], self.py[i]
-                if x < 0 or y < 0 or x >= G or y >= G:
-                    self.palive[i] = False
-                    break
+                if x < 1 or x >= G - 1:
+                    self.pvx[i] = -self.pvx[i]; self.px[i] = min(max(x, 1.0), G - 1.5); x = self.px[i]
+                if y < 1 or y >= G - 1:
+                    self.pvy[i] = -self.pvy[i]; self.py[i] = min(max(y, 1.0), G - 1.5); y = self.py[i]
                 ix, iy = int(x), int(y)
                 # paint disk, decrement number in real time
                 r = int(rad)
@@ -680,7 +638,7 @@ class Demo:
                                     self.pval[i] -= 0.4
                                     continue
                             self.grid[yy, xx] = t
-                            self.pval[i] -= 1.0
+                            self.pval[i] -= PAINT_COST
                             painted += 1
                             if self.pval[i] <= 0:
                                 break
@@ -690,7 +648,7 @@ class Demo:
                     self.fx[iy, ix] = np.maximum(
                         self.fx[iy, ix], np.array(TEAMS[t][1], np.float32))
                 # mild energy drain even on own color so shots end
-                self.pval[i] -= 0.03
+                self.pval[i] -= 0.012
                 if self.pval[i] <= 0:
                     self.palive[i] = False
                     break
@@ -777,6 +735,7 @@ class Demo:
         ev = []
         # countdown timers
         self.shield = np.maximum(self.shield - 1, 0)
+        self.shield_pop = np.maximum(self.shield_pop - 1, 0)
         self.power_t = np.maximum(self.power_t - 1, 0)
         self.fire_cd = np.maximum(self.fire_cd - 1, 0)
         for t in range(self.nt):
@@ -786,10 +745,10 @@ class Demo:
                 self.power[t] = None
 
         # scripted world events
-        if self.f == 135 and self.boss is None:
+        if self.f == 165 and self.boss is None:
             self.spawn_boss(ev)
         # ensure boss dies by ~7.5s if still up: inject damage
-        if self.boss and self.f == 215:
+        if self.boss and self.f == 245:
             # guarantee kill ~7.2s; damage share favors red/green for visible reward split
             need = max(0.0, self.boss["maxhp"] - float(self.boss_dmg.sum()) + 50)
             weights = np.array([0.35, 0.20, 0.28, 0.17], dtype=np.float64)[:self.nt]
@@ -810,7 +769,11 @@ class Demo:
                 bx, by = self.bases[t]
                 self.ang[t] = math.atan2(self.boss["y"] - by, self.boss["x"] - bx)
             else:
-                self.ang[t] += self.spin
+                # fixed-speed sweep across the inward arc (corner bases never waste shots off-map)
+                c0 = math.atan2(G / 2 - self.bases[t, 1], G / 2 - self.bases[t, 0])
+                ph = (self.f * self.spin) % 4.0
+                tri = ph - 1.0 if ph < 2.0 else 3.0 - ph          # -1..1 triangle wave
+                self.ang[t] = c0 + 0.70 * tri
             # slow fire (after brief warmup)
             if self.f >= 40:
                 self.fire_team(t, ev)
@@ -916,50 +879,48 @@ def build_static_bg(layout: PlinkoLayout, nt):
                         fill=(12, 15, 32), outline=(70, 200, 240), width=2)
     ctext(d, (PX0 + PX1) / 2, PTOP + 4, "共享弹珠台 · 全队顶中发球", font(20), (180, 230, 255), 2)
 
-    # pyramids (upper)
-    for pyr in layout.pyramids:
-        mid, left, right = pyr["mid"], pyr["left"], pyr["right"]
-        tip_y, base_y = pyr["tip_y"], pyr["base_y"]
-        pts = [
-            (PX0 + mid, PTOP + (tip_y - PTOP)),
-            (PX0 + left, PTOP + (base_y - PTOP)),
-            (PX0 + right, PTOP + (base_y - PTOP)),
-        ]
-        # convert: tip_y/base_y are already absolute-ish in plinko Y from PTOP?
-        # We stored tip_y as absolute screen-ish from SLOT1_Y. Use as local from top of plinko content.
-        pts = [(PX0 + mid, tip_y), (PX0 + left, base_y), (PX0 + right, base_y)]
-        d.polygon(pts, fill=(28, 36, 70), outline=(120, 150, 220))
-        # sharp edge highlight
-        d.line([(PX0 + mid, tip_y), (PX0 + left, base_y)], fill=(160, 190, 255), width=2)
-        d.line([(PX0 + mid, tip_y), (PX0 + right, base_y)], fill=(160, 190, 255), width=2)
-
-    # multiplier slots
+    MC = {1: (180, 190, 220), 2: (110, 220, 255), 4: (255, 210, 70), 8: (255, 140, 80), 16: (255, 80, 120)}
+    X = lambda x: PX0 + x
+    # upper half tint = bounce-back area
+    d.rounded_rectangle((PX0 + 6, PTOP + 26, PX1 - 6, LEDGE_Y + SLOT_H + 4), 10, fill=(16, 20, 44))
+    ctext(d, X(PW * 0.12), PTOP + 32, "背离区 ↑", font(16), (130, 170, 255), 1)
+    # angled deflector bars (no round pegs)
+    for (a, b) in layout.bars + layout.low_bars:
+        d.line([(X(a[0]), a[1]), (X(b[0]), b[1])], fill=(120, 150, 230), width=8)
+        d.line([(X(a[0]), a[1]), (X(b[0]), b[1])], fill=(185, 205, 255), width=2)
+    # bounce-back ridges (low, shallow) between multiplier openings
+    h = layout.ridge_h; nz = len(layout.zones)
+    for i, (a, b) in enumerate(layout.zones):
+        if i == 0:
+            poly = [(X(a), LEDGE_Y - h * 1.5), (X(b), LEDGE_Y), (X(a), LEDGE_Y)]
+        elif i == nz - 1:
+            poly = [(X(a), LEDGE_Y), (X(b), LEDGE_Y - h * 1.5), (X(b), LEDGE_Y)]
+        else:
+            poly = [(X(a), LEDGE_Y), (X((a + b) / 2), LEDGE_Y - h), (X(b), LEDGE_Y)]
+        d.polygon(poly + [(poly[-1][0], LEDGE_Y + SLOT_H), (poly[0][0], LEDGE_Y + SLOT_H)], fill=(34, 40, 78))
+        d.line(poly, fill=(150, 185, 255), width=4)
+        ctext(d, X((a + b) / 2), LEDGE_Y + 12, "↑", font(20), (110, 140, 220), 1)
+    # multiplier openings (bigger = narrower)
     for mult, a, b in layout.slots:
-        col = {
-            1: (180, 190, 220), 2: (110, 220, 255), 4: (255, 210, 70),
-            8: (255, 140, 80), 16: (255, 80, 120),
-        }[mult]
-        fill = (24 + mult, 28, 50 + mult * 4)
-        d.rounded_rectangle((PX0 + a + 1, SLOT1_Y, PX0 + b - 1, SLOT1_Y + SLOT1_H),
-                            6, fill=fill, outline=col, width=2)
-        ctext(d, PX0 + (a + b) / 2, SLOT1_Y + 12, f"{mult}×", font(26 if mult < 8 else 20), col, 2)
-
-    # floor ledge line (wider collision visual)
-    d.rectangle((PX0 + 4, SLOT1_Y + SLOT1_H - 4, PX1 - 4, SLOT1_Y + SLOT1_H + 6),
-                fill=(50, 60, 100))
-
-    # teleport blank zone
-    d.rounded_rectangle((PX0 + 6, layout.tele_y0, PX1 - 6, layout.tele_y1), 8,
-                        fill=(18, 22, 48), outline=(100, 140, 255), width=2)
-    ctext(d, (PX0 + PX1) / 2, layout.tele_y0 + 18, "传送区 · 叠倍率回顶", font(22),
-          (140, 180, 255), 2)
-
-    # power slots (no upgrades / no 加速 / no 冰冻)
-    for name, a, b in layout.powers:
+        col = MC[mult]
+        d.rectangle((X(a), LEDGE_Y, X(b), LEDGE_Y + SLOT_H), fill=(26 + mult * 3, 26, 52))
+        d.line([(X(a), LEDGE_Y - 4), (X(a), LEDGE_Y + SLOT_H)], fill=col, width=3)
+        d.line([(X(b), LEDGE_Y - 4), (X(b), LEDGE_Y + SLOT_H)], fill=col, width=3)
+        ctext(d, X((a + b) / 2), LEDGE_Y + 10, f"{mult}×", font(24 if mult < 8 else 19), col, 2)
+    ctext(d, (PX0 + PX1) / 2, LEDGE_Y + SLOT_H + 10, "▼ 下层：传送 / 道具", font(16), (120, 140, 190), 1)
+    # bottom row: teleport (bigger) + 4 items
+    ta, tb = layout.tele
+    d.rounded_rectangle((X(ta) + 6, ROW_Y, X(tb) - 2, ROW_Y + ROW_H), 8,
+                        fill=(22, 30, 70), outline=(110, 150, 255), width=3)
+    ctext(d, X((ta + tb) / 2), ROW_Y + 10, "传送区", font(26), (150, 190, 255), 2)
+    ctext(d, X((ta + tb) / 2), ROW_Y + 46, "带倍率回顶 · 叠加", font(16), (130, 160, 230), 1)
+    for name, a, b in layout.items:
         col = POW_COL[name]
-        d.rounded_rectangle((PX0 + a + 2, POW_Y, PX0 + b - 2, POW_Y + POW_H), 6,
-                            fill=(30, 24, 55), outline=col, width=2)
-        ctext(d, PX0 + (a + b) / 2, POW_Y + 16, name, font(22), col, 2)
+        d.rounded_rectangle((X(a) + 3, ROW_Y, X(b) - 3, ROW_Y + ROW_H), 8,
+                            fill=(32, 24, 56), outline=col, width=2)
+        ctext(d, X((a + b) / 2), ROW_Y + 26, name, font(22), col, 2)
+    for x in layout.row_div:   # shallow bounce ridges on dividers
+        d.line([(X(x - 34), ROW_Y), (X(x), ROW_Y - 16), (X(x + 34), ROW_Y)], fill=(185, 205, 255), width=4)
 
     # map frame
     d.rectangle((MX - 5, MY - 5, MX + G + 4, MY + G + 4), outline=(70, 230, 255), width=2)
@@ -990,7 +951,7 @@ def render(out_path, preview_prefix, seed=5, nt=4):
         stdin=subprocess.PIPE,
     )
     frames_ev = []
-    snap_at = {15: "00", 45: "01", 90: "02", 150: "03", 210: "04", 230: "05", 260: "06", 290: "07"}
+    snap_at = {40: "00", 75: "01", 110: "02", 140: "03", 180: "04", 215: "05", 255: "06", 290: "07"}
     t0 = time.time()
 
     for fi in range(demo.maxf):
@@ -1025,7 +986,7 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             ty += 42
 
         # team legend under tips
-        ly = PBOT - 8 - nt * 28
+        ly = PBOT - 10 - nt * 36
         for t in range(nt):
             c = TEAMS[t][1]
             d.ellipse((TIP_X0 + 12, ly + 4, TIP_X0 + 28, ly + 20), fill=c)
@@ -1034,7 +995,7 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             if demo.mult_bonus[t] > 1:
                 d.text((TIP_X0 + 34, ly + 16), f"球加成×{demo.mult_bonus[t]}",
                        font=font(13), fill=(255, 230, 140))
-            ly += 28
+            ly += 36
 
         # ---- marbles on plinko ----
         for m in demo.marbles:
@@ -1050,7 +1011,6 @@ def render(out_path, preview_prefix, seed=5, nt=4):
         cx = PX0 + PW / 2
         d.polygon([(cx - 12, LAYER1_Y - 8), (cx + 12, LAYER1_Y - 8), (cx, LAYER1_Y + 6)],
                   fill=(200, 220, 255))
-        ctext(d, cx, LAYER1_Y - 28, "发球口", font(14), (180, 200, 230), 1)
 
         # ---- bases: ONE barrel each ----
         for t in range(nt):
@@ -1064,7 +1024,9 @@ def render(out_path, preview_prefix, seed=5, nt=4):
             if demo.shield[t] > 0 and demo.shield_hp[t] > 0:
                 sr = 38
                 d.ellipse((X - sr, Y - sr, X + sr, Y + sr), outline=(120, 240, 255), width=3)
-                ctext(d, X, Y - sr - 18, str(int(demo.shield_hp[t])), font(18), (120, 240, 255), 2)
+                pop = demo.shield_pop[t]
+                fsz = 20 + pop
+                ctext(d, X, Y - sr - 18 - pop, str(int(demo.shield_hp[t])), font(fsz), (120, 240, 255), 3)
             # single barrel tube
             ang = demo.ang[t]
             L = 36
@@ -1086,15 +1048,16 @@ def render(out_path, preview_prefix, seed=5, nt=4):
                 continue
             X = MX + demo.px[i]; Y = MY + demo.py[i]
             frac = val / max(1e-3, demo.pbase[i])
-            rad = max(3.5, 5.0 + 10.0 * frac)
+            rad = max(3.5, 5.0 + 10.0 * frac) if demo.ppow[i] else 4.5   # normal bullets: small, no number
             if demo.pkind[i] == 2:
                 rad *= 1.55
             c = TEAMS[t][1]
             d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c, outline=(255, 255, 255), width=2)
-            # number on projectile (realtime decay visualized)
-            num_s = str(int(max(1, round(val))))
-            fs = 13 if rad < 8 else 17
-            ctext(d, X, Y - fs * 0.55, num_s, font(fs), (255, 255, 255), 2)
+            if demo.ppow[i]:
+                # power-up shot: number decays + shrinks in real time
+                num_s = str(int(max(1, round(val))))
+                fs = 13 if rad < 8 else 17
+                ctext(d, X, Y - fs * 0.55, num_s, font(fs), (255, 255, 255), 2)
 
         # ---- boss ----
         if demo.boss is not None:
