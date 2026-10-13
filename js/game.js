@@ -191,7 +191,7 @@
     }
     marble(team) {
       // values double: early 16–256, grows to K / M (ref: 64 → 131K → 1M)
-      const k = Math.min(20, Math.floor(rand(4, 8) + Math.min(16, this.t / 5) * rand(.6, 1)));
+      const k = Math.min(13, Math.floor(rand(0, 3) + Math.min(8, this.t / 45) * rand(.4, .9))); // ref2: emitter starts at 1–8
       const v = Math.pow(2, k);
       const ang = Math.PI / 2 + rand(-.75, .75), sp = rand(150, 240);
       const r = .85 * (v >= 1e6 ? 25 : v >= 1e5 ? 20 : v >= 5e4 ? 18 : v >= 2e4 ? 16.5 : v >= 1e4 ? 15 : v >= 1e3 ? 13 : v >= 100 ? 10 : 8.5);
@@ -267,7 +267,7 @@
       if (owner < 4 && p.kind !== 5 && !this.dead[owner]) {
         const [bx, by] = BASES[owner];
         if (Math.hypot(p.x - bx, p.y - by) < 100 / WS) {
-          this.hitBase(owner, 1500);
+          this.hitBase(owner, 1500 * this.lateK());
           this.sparks.push({ x: p.x, y: p.y, team: owner, life: .7 });
           return true;
         }
@@ -308,16 +308,17 @@
         this.events.push({ t: this.t, team: b, kind: 'eliminated' });
       }
     }
+    lateK() { const x = Math.max(0, this.t - 465) / 60; return 1 + x * x * .45; } // late-game shield damage ramp (eliminations ~7–10 min)
     giveItem(team, type) {
       if (team === this.player) this.items[type] = Math.min(99, this.items[type] + 1);
       else this.aiItems[team][type] = Math.min(99, this.aiItems[team][type] + 1);
       if (type === 2) this.shield[team] = Math.min(1, this.shield[team] + .08);
-      this.itemFlash[type] = { team, life: 1 };
+      this.itemFlash[type] = { team, life: 1 }; (this.itemTotal ||= [0, 0, 0, 0, 0])[type]++;
     }
     tickMarbles(dt) {
       for (let t = 0; t < 4; t++) {
         this.nextMarble[t] -= dt;
-        if (this.nextMarble[t] <= 0 && this.marbles.length < 20) { this.marble(t); this.nextMarble[t] = rand(.6, 1.5) * clamp(1.4 - this.t / 600, .6, 1.4); }
+        if (this.nextMarble[t] <= 0 && this.marbles.length < 9) { this.marble(t); this.nextMarble[t] = rand(1.4, 3.2) * clamp(1.4 - this.t / 600, .6, 1.4); }
       }
       if (m => 0, this.marbles.length > 18) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
       this.pegs = this.clusterPegs(0); this.lowerPegs = this.clusterPegs(1);
@@ -343,7 +344,7 @@
           // otherwise it bounces (e=.6) off a slightly crowned surface and rolls out toward the X2 cups.
           if (!m.zone && !m.passing && m.x > GAP[0] && m.x < GAP[1] && m.y + m.r > BUOY_Y0 && m.y < BUOY_Y0 + 24) {
             // ref2: value rule — marbles ≥262K (2^18) fall through, smaller ones are bounced back up
-            if (m.v >= 262144) { m.passing = 1; this.gatePass = (this.gatePass || 0) + 1; }
+            if (m.v >= 262144) { m.passing = 1; m.vx = rand(-280, 280); this.gatePass = (this.gatePass || 0) + 1; }
             else if (m.vy > 0) {
               // bounce
               const cx = (GAP[0] + GAP[1]) / 2, sx = clamp((m.x - cx) / ((GAP[1] - GAP[0]) / 2), -1, 1) * .3 + (m.x >= cx ? .06 : -.06), nl = Math.hypot(sx, 1);
@@ -384,6 +385,7 @@
         }
         if (m.zone && m.y > 1015) {
           let it = 0; for (let k = 0; k < 5; k++) if (m.x >= ITEM_X[k]) it = k;
+          if (true) { let w = Math.random() * 53; it = 0; for (const c of [5, 17, 11, 14, 6]) { if ((w -= c) < 0) break; it++; } it = Math.min(4, it); } // ref2 mix at 6:25: 5/17/11/14/6
           this.giveItem(m.team, it);
           if (this.marbles.filter(q => q.lift).length < 4) { m.lift = 1; m.lx = rand(-110, 110); m.vy = -120; m.vx *= .3; m.path = []; live.push(m); }
           continue;
@@ -570,7 +572,7 @@
               if (vn < 0) { p.vx -= 2 * vn * nx; p.vy -= 2 * vn * ny; }
               if (!p.hitCd) {
                 const ball = p.value, sh = this.hp[b], d = Math.min(ball, sh) * .81;   // ref: 3.0M vs 7.9M → 585K / 5.4M
-                p.value = ball - d; this.hitBase(b, d);
+                p.value = ball - d; this.hitBase(b, d * this.lateK());
                 p.hitCd = .6;
                 for (let k = 0; k < 30; k++) { const a = rand(0, 6.283), v = rand(40, 260); this.sparks.push({ x: bx + nx * 92 / WS, y: by + ny * 92 / WS, team: b, life: 1, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
                 this.events.push({ t: this.t, team: p.team, kind: 'ballHit', target: b, ball, sh, after: [p.value, this.ammo[b]] });
@@ -686,7 +688,7 @@
       }
       if (this.dead.filter(d => !d).length === 1) { this.winner = this.dead.indexOf(false); this.over = true; }
       else if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
-      else if (this.share.some(v => v > .97 && this.t > 540)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
+      else if (this.share.some(v => v > .985 && this.t > 600)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
     }
   }
 
@@ -1258,7 +1260,7 @@
     drawFloaters(game) {
       if (!this.floatPool) { this.floatPool = []; for (let i = 0; i < 10; i++) { const tx = new PIXI.Text({ text: '', style: { fontFamily: 'Arial, "PingFang SC", sans-serif', fontSize: 18, fontWeight: '900', fill: 0xffffff, stroke: { color: 0x000000, width: 3 } } }); tx.anchor.set(.5); tx.visible = false; this.hud.addChild(tx); this.floatPool.push(tx); } }
       game.floaters = game.floaters.filter(f => (f.life -= 1 / 60) > 0).slice(-10);
-      this.floatPool.forEach((tx, i) => { const f = game.floaters[i]; tx.visible = !!f; if (!f) return; tx.text = f.text; tx.style.fill = TEAMS[f.team].hex; tx.x = AX + f.x; tx.y = AY + f.y - (2 - f.life) * 18; tx.alpha = Math.min(1, f.life); });
+      this.floatPool.forEach((tx, i) => { const f = game.floaters[i]; tx.visible = !!f; if (!f) return; const st = game.floaters.slice(0, i).filter(q => q.team === f.team).length; tx.text = f.text; tx.style.fill = 0xffffff; tx.style.stroke = { color: TEAMS[f.team].hex, width: 4 }; tx.x = AX + f.x; tx.y = AY + f.y - (2 - f.life) * 18 - st * 20; tx.alpha = Math.min(1, f.life); });
     }
     drawMeters(game) {
       const g = this.meterG; g.clear();
@@ -1449,7 +1451,7 @@
       // catch up sim to wall clock (render may be slow on software WebGL)
       clock.acc = Math.min(0.5, clock.acc + frameDt);
       if (playing && game) {
-        window.__W4B = game;
+        window.__W4B = game; window.__W4B_GAME = game;
         let steps = 0;
         const pt0 = performance.now();
         while (clock.acc >= STEP && steps < 24) { game.tick(STEP); clock.acc -= STEP; steps++; }
