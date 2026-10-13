@@ -38,7 +38,7 @@ OPEN_AIM_F = int(2.4 * FPS)              # opening: all guns aim center + spray,
                        # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
 SUB = 1
-MULTS = [2, 8, 4, 2, 2, 4, 8, 2]               # left 2/8/4/2 | tele | right 2/4/8/2 (mirrored)
+MULTS = [2, 4, 8, 8, 4, 2]                     # restored: 2×4×8×|8×4×2× continuous ledge
 POWERS = ["护盾", "大球", "散射", "激光"]
 POW_COL = {
     "护盾": (120, 240, 255), "大球": (255, 120, 210),
@@ -160,46 +160,43 @@ def voronoi_grid(bases, g, rng):
 class PlinkoLayout:
     """Vertical ladder board.
 
-    Upper half: angled deflector bars (busy area) then the multiplier ledge.
-      Between multiplier openings sit bounce ridges under 「倍率」: low, shallow ridges
-      that kick a ball back UP toward the top. Bigger multiplier = narrower opening.
-    Lower half: regular white pegs only (NO slanted slopes), then ONE row:
-      4 items | TELE(~⅔ center) | 4 items (each powerup twice). Flat dividers only.
+    Mid ledge: continuous 2×4×8×|8×4×2× (widths ∝ 1/mult). NO mid-ledge teleport.
+    Lower: regular white pegs (NO slopes), then bottom row:
+      4 items | TELE(~⅔ center) | 4 items. Flat dividers only. Fountain spawn top-center.
     All coords are plinko-local x (0..PW) and screen y.
     """
 
     def __init__(self):
-        # Reference ledge: left x2,x8,x4,x2 | center teleport arrows | right x2,x4,x8,x2
-        # widths ∝ 1/mult within each side; flat stepped slots, NO slopes anywhere
-        left_m = [2, 8, 4, 2]
-        right_m = [2, 4, 8, 2]   # mirror of left order when reading L→R on the right wing
-        tele_w = PW * 0.22      # center teleport gap (arrow row)
+        # Restored ledge: continuous 2×4×8×|8×4×2× (NO mid-ledge tele); widths ∝ 1/mult
+        mults = list(MULTS)  # [2,4,8,8,4,2]
+        gap = 4.0
+        rel = np.array([1.0 / m for m in mults], float)
+        open_w = PW - gap * (len(mults) - 1)
+        ws = open_w * rel / rel.sum()
+        wmin = 2 * BALL_R + 4
+        if ws.min() < wmin:
+            ws *= wmin / ws.min(); ws *= open_w / ws.sum()
+        self.slots, x = [], 0.0
+        for m, w in zip(mults, ws):
+            self.slots.append((m, x, x + w)); x += w + gap
+        # Bottom row: 4 items | TELE(~⅔ center) | 4 items — flat dividers, no slopes
+        tele_w = PW * (2.0 / 3.0)
         side_w = (PW - tele_w) / 2.0
-        def pack(mults, x0, width):
-            rel = np.array([1.0 / m for m in mults], float)
-            # leave tiny flat dividers (~4px) between slots, not ridges
-            gap = 4.0
-            open_w = width - gap * (len(mults) - 1)
-            ws = open_w * rel / rel.sum()
-            wmin = 2 * BALL_R + 4
-            if ws.min() < wmin:
-                ws *= wmin / ws.min(); ws *= open_w / ws.sum()
-            out, x = [], x0
-            for m, w in zip(mults, ws):
-                out.append((m, x, x + w)); x += w + gap
-            return out
-        self.slots = pack(left_m, 0.0, side_w) + pack(right_m, side_w + tele_w, side_w)
-        self.tele = (side_w, side_w + tele_w)          # mid-ledge teleport gap
-        self.zones = []                                 # no bounce ridges
+        self.tele = (side_w, side_w + tele_w)
+        iw = side_w / 4.0
+        left_items = [(POWERS[i], i * iw, (i + 1) * iw) for i in range(4)]
+        right_items = [(POWERS[i], side_w + tele_w + i * iw, side_w + tele_w + (i + 1) * iw) for i in range(4)]
+        self.items = left_items + right_items
+        self.row_div = [iw * i for i in range(1, 4)] + [side_w, side_w + tele_w] + [side_w + tele_w + iw * i for i in range(1, 4)]
+        self.zones = []
         self.ridge_h = 0.0
-        self.bars = []                                  # NO slanted slopes anywhere
+        self.bars = []
         self.low_bars = []
-        # pegs: large, sparse, regular stagger — upper 3 rows, lower 2 rows
+        # regular white pegs: upper 3 rows, lower 2 rows (sparse large)
         self.peg_r = 9.0
         self.pegs = []
         def add_rows(y0, nrows, counts):
-            # counts[i] = pegs in row i; staggered; symmetric about center
-            sp = (PW - 80) / 8.0   # wide even spacing (~90px on 802 board)
+            sp = (PW - 80) / 8.0
             for r in range(nrows):
                 n = counts[r]
                 y = y0 + r * 52.0
@@ -214,14 +211,8 @@ class PlinkoLayout:
                 xs = [x for x in xs if 30 <= x <= PW - 30]
                 for x in sorted(xs)[:n]:
                     self.pegs.append((float(x), float(y)))
-        # upper ~3 rows (≈5,7,6 pattern-ish)
         add_rows(LAYER1_Y + 70, 3, [5, 7, 6])
-        # lower ~2 rows below ledge
         add_rows(LEDGE_Y + SLOT_H + 50, 2, [6, 7])
-        # bottom item row: 8 equal small slots (each powerup twice), flat dividers — skills stay available
-        iw = PW / 8.0
-        self.items = [(POWERS[i % 4], i * iw, (i + 1) * iw) for i in range(8)]
-        self.row_div = [iw * i for i in range(1, 8)]
 
     def slot_at(self, x):
         for m, a, b in self.slots:
@@ -301,7 +292,7 @@ def build_plinko_space(layout: PlinkoLayout):
         sh = pymunk.Circle(body, layout.peg_r)
         sh.elasticity, sh.friction = 0.70, 0.40
         space.add(body, sh)
-    opens = sorted([(a, b) for _, a, b in layout.slots] + [tuple(layout.tele)])
+    opens = sorted([(a, b) for _, a, b in layout.slots])  # tele is bottom row, not mid-ledge hole
     cursor = 0.0
     for a, b in opens:
         if a - cursor > 2:
@@ -515,20 +506,8 @@ class Demo:
             if not m.alive or m.state != "fall":
                 continue
             self._sync_from_body(m)
-            # mid ledge holes
+            # mid ledge: multiplier slots only (no tele here)
             if (not getattr(m, "_ledge_done", False)) and m.y > LEDGE_Y + 6:
-                if L.tele_at(m.x):
-                    stacked = m.mult
-                    self._detach_body(m); m.alive = False; m.state = "done"
-                    nxt = self.tele_next.get(m.script_tag, "M4|散射")
-                    # keep scripted lower target if any
-                    _up, low = self._split_force(m._force)
-                    force = nxt if (_up == "TELE" or m.script_tag in self.tele_next) else (f"M2|{low}" if low else nxt)
-                    self.spawn_marble(m.t, stacked, self.rng.uniform(-0.5, 0.5),
-                                      tag=m.script_tag + "_re", force=force)
-                    ev.append(("tele", m.t, stacked))
-                    self.tip(f"{TEAMS[m.t][0]} 传送 · 带{stacked}×回顶", TEAMS[m.t][1], 60)
-                    continue
                 sm = L.slot_at(m.x)
                 if sm is not None and not m.hit_mult:
                     for si, (mm, a, b) in enumerate(L.slots):
@@ -541,9 +520,20 @@ class Demo:
                     ev.append(("mult", m.t, sm))
                     self.tip(f"{TEAMS[m.t][0]} 命中 {sm}×", TEAMS[m.t][1], 50)
                 elif m.y > LEDGE_Y + SLOT_H:
-                    m._ledge_done = True  # passed ledge deck without hole (shouldn't)
-            # bottom items
+                    m._ledge_done = True
+            # bottom row: TELE(~⅔) or item slot
             if m.y >= ROW_Y + 8:
+                if L.tele_at(m.x):
+                    stacked = m.mult
+                    self._detach_body(m); m.alive = False; m.state = "done"
+                    nxt = self.tele_next.get(m.script_tag, "M4|散射")
+                    _up, low = self._split_force(m._force)
+                    force = nxt if (_up == "TELE" or m.script_tag in self.tele_next) else (f"M2|{low}" if low else nxt)
+                    self.spawn_marble(m.t, stacked, self.rng.uniform(-0.5, 0.5),
+                                      tag=m.script_tag + "_re", force=force)
+                    ev.append(("tele", m.t, stacked))
+                    self.tip(f"{TEAMS[m.t][0]} 传送 · 带{stacked}×回顶", TEAMS[m.t][1], 60)
+                    continue
                 _up, low = self._split_force(m._force)
                 cell = low if (low in POW_COL) else L.cell_at(m.x)
                 self._detach_body(m); m.alive = False; m.state = "done"
@@ -1127,22 +1117,21 @@ def build_static_bg(layout: PlinkoLayout, nt):
     pr = layout.peg_r
     for px, py in layout.pegs:
         d.ellipse((X(px) - pr, py - pr, X(px) + pr, py + pr), fill=(245, 248, 255), outline=(200, 210, 230))
-    # flat stepped ledge deck
+    # flat stepped ledge deck — continuous 2/4/8/8/4/2
     d.rectangle((PX0, LEDGE_Y - 3, PX1, LEDGE_Y + 3), fill=(70, 80, 110))
-    # multiplier slots (flat rectangles) + hit counts above
     for si, (mult, a, b) in enumerate(layout.slots):
         col = MC.get(mult, (200, 200, 220))
         d.rectangle((X(a) + 1, LEDGE_Y, X(b) - 1, LEDGE_Y + SLOT_H), fill=(40, 44, 70), outline=col, width=2)
         ctext(d, X((a + b) / 2), LEDGE_Y + 14, f"x{mult}", font(16 if mult < 8 else 13), col, 1)
-    # center teleport gap = row of small upward arrows
+    # bottom: 4 items | TELE(~⅔ ↑ arrows) | 4 items
     ta, tb = layout.tele
-    d.rectangle((X(ta), LEDGE_Y, X(tb), LEDGE_Y + SLOT_H), fill=(18, 22, 40))
-    n_ar = max(5, int((tb - ta) / 22))
+    d.rectangle((X(ta), ROW_Y, X(tb), ROW_Y + ROW_H), fill=(18, 22, 40))
+    n_ar = max(7, int((tb - ta) / 28))
     for i in range(n_ar):
         cx = X(ta + (i + 0.5) * (tb - ta) / n_ar)
-        cy = LEDGE_Y + SLOT_H / 2
-        d.polygon([(cx, cy - 10), (cx - 6, cy + 6), (cx + 6, cy + 6)], fill=(230, 235, 255))
-    # bottom item row (full width, 8 small slots)
+        cy = ROW_Y + ROW_H / 2
+        d.polygon([(cx, cy - 14), (cx - 8, cy + 8), (cx + 8, cy + 8)], fill=(230, 235, 255))
+    ctext(d, X((ta + tb) / 2), ROW_Y + 6, "传送", font(14), (180, 200, 230), 1)
     for name, a, b in layout.items:
         col = POW_COL[name]
         d.rounded_rectangle((X(a) + 1, ROW_Y, X(b) - 1, ROW_Y + ROW_H), 5,
