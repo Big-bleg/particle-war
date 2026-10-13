@@ -4,17 +4,17 @@
   const W = 1920, H = 1080, LEFT = 760, G = 1000, AX = 860, AY = 40, WS = 1.75, GS = Math.round(168 * WS), S = G / GS; // world scale: finer grid, smaller props
   const PX = 0, PW = 760, BAND = 430, ITEMY = 928, ITEMH = 124;
   // 1:1 ref layout (measured from douyin_detail frames, 1920x1080 space)
-  const LEDGE_TOP = 430, LEDGE_BOT = 540, LGROUP = [[0, 222], [538, 760]], GAP = [222, 538];
-  const SLOT_X = [[2, 76, 0], [76, 148, 1], [148, 222, 2], [538, 612, 3], [612, 684, 4], [684, 758, 5]]; // x0,x1,slot
+  const LEDGE_TOP = 435, LEDGE_BOT = 470, LGROUP = [[0, 266], [494, 760]], GAP = [266, 494]; // compact cup rows (skeleton ref)
+  const SLOT_X = [[6, 92, 0], [98, 136, 1], [142, 180, 2], [186, 260, 3], [500, 574, 4], [580, 618, 5], [624, 662, 6], [668, 754, 7]]; // x0,x1,slot
   const ITEM_X = [0, 138, 290, 448, 601, 760];
-  const MULT = [8, 4, 2, 2, 4, 8], NAMES = ['散弹', '机枪', '护盾', '大球', '狙击'];
+  const MULT = [2, 8, 4, 2, 2, 4, 8, 2], NAMES = ['散弹', '机枪', '护盾', '大球', '狙击'];
   const TEAMS = [
     { name: '红队', c: [255, 20, 70], hi: [255, 90, 130], glow: [255, 40, 90], edge: [255, 200, 220], hex: 0xff1446 },
     { name: '绿队', c: [0, 230, 140], hi: [80, 255, 200], glow: [0, 255, 170], edge: [160, 255, 220], hex: 0x00e68c },
     { name: '蓝队', c: [0, 140, 255], hi: [70, 210, 255], glow: [40, 170, 255], edge: [160, 220, 255], hex: 0x008cff },
     { name: '橙队', c: [255, 165, 20], hi: [255, 220, 80], glow: [255, 185, 40], edge: [255, 240, 180], hex: 0xffa514 }
   ];
-  const NEUTRAL = 4, BASES = [[120, 120], [880, 120], [120, 880], [880, 880]], MATCH = 960;
+  const NEUTRAL = 4, BASES = [[120, 120], [880, 120], [120, 880], [880, 880]], MATCH = 660;
   const MAX_SHOTS = 6000, SILK_CAP = 7000, RIBBON_CAP = 1800;
   const TRES = GS; // 2x upload with domain-warped sampling → organic foam
 
@@ -88,7 +88,7 @@
       this.ammo = [25.06e6, 25.02e6, 24.84e6, 25.12e6];
       this.score = [198000, 296000, 220000, 299000]; this.shield = [1, 1, 1, 1];
       this.items = [0, 0, 0, 0, 0]; this.aiItems = Array.from({ length: 4 }, () => [0, 0, 0, 0, 0]);
-      this.hit = [0, 0, 0, 0, 0, 0]; this.slotFlash = []; this.itemFlash = [];
+      this.hit = [0, 0, 0, 0, 0, 0, 0, 0]; this.slotFlash = []; this.itemFlash = [];
       this.marbles = []; this.nextMarble = [.15, .35, .55, .8]; this.cool = [0, 0, 0, 0];
       this.aim = BASES.map(([x, y]) => Math.atan2(G / 2 - y, G / 2 - x));
       this.playerAim = this.aim[player];
@@ -124,7 +124,7 @@
       return a;
     }
     // rotating hexagon peg clusters (kinematic): 6 corner pegs + centre peg, constant angular speed
-    makeClusters() { return [[190, 250, .9], [570, 250, -.9], [190, 725, -.9], [570, 725, .9]].map(([cx, cy, w], i) => ({ cx, cy, w, a0: i * .5, R: 62, zone: cy > 500 ? 1 : 0 })); }
+    makeClusters() { return [[190, 240, .9], [570, 240, -.9], [190, 730, -.9], [570, 730, .9]].map(([cx, cy, w], i) => ({ cx, cy, w, a0: i * .5, R: 62, zone: cy > 500 ? 1 : 0 })); }
     clusterPegs(zone) {
       const out = [];
       for (const C of this.clusters) {
@@ -354,11 +354,17 @@
         }
         // marbles too wide for a cup come to rest on the pillar tops: count them as landed in that cup
         m.rest = (!m.zone && m.y > 280 && (m.x < GAP[0] || m.x > GAP[1]) && Math.hypot(m.vx, m.vy) < 40) ? (m.rest || 0) + dt : 0;
-        if (!m.zone && (m.y > LEDGE_TOP + 20 || m.rest > .4) && (m.x < GAP[0] || m.x > GAP[1] || m.y > BUOY_Y1)) {
+        const cupSl = (m.x < GAP[0] || m.x > GAP[1]) ? SLOT_X.find(z => m.x >= z[0] - 3 && m.x < z[1] + 3) : null;
+        if (!m.zone && ((cupSl && m.y + m.r > SLOT_TOP[cupSl[2]]) || m.rest > .4 || m.y > BUOY_Y1) && (m.x < GAP[0] || m.x > GAP[1] || m.y > BUOY_Y1)) {
           const inGroup = m.x < GAP[0] || m.x > GAP[1];
           if (inGroup) {
-            const sl = SLOT_X.find(z => m.x >= z[0] && m.x < z[1]); const slot = sl ? sl[2] : (m.x < GAP[0] ? 2 : 3);
-            this.hit[slot]++; this.award(m.team, slot, m.v); continue;
+            const sl = SLOT_X.find(z => m.x >= z[0] && m.x < z[1]); const slot = sl ? sl[2] : (m.x < GAP[0] ? 3 : 4);
+            this.hit[slot]++; this.award(m.team, slot, m.v);
+            // multiplier cup: value ×X (stacks), then relaunch from the top centre
+            m.v = Math.min(m.v * MULT[slot], 2 ** 34); const v = m.v;
+            m.r = .85 * (v >= 1e6 ? 25 : v >= 1e5 ? 20 : v >= 5e4 ? 18 : v >= 2e4 ? 16.5 : v >= 1e4 ? 15 : v >= 1e3 ? 13 : v >= 100 ? 10 : 8.5);
+            m.x = LEFT / 2 + rand(-30, 30); m.y = 30; m.vx = rand(-120, 120); m.vy = rand(40, 90); m.age = 0; m.rest = 0; m.trail = []; m.path = [[m.x, m.y]]; m.passing = 0;
+            live.push(m); continue;
           }
           m.zone = 1; m.path = []; m.passed = 1;
         }
@@ -452,7 +458,9 @@
         }
         if (t === this.player && this.autoAim) this.playerAim = this.aim[t];
         this.cool[t] -= dt; if (!this.opened) continue;
-        const rate = clamp(.11 - this.t * .0001, .04, .11) / this.power[t];
+        // rubber band before 7:00: teams above 30% fire slower, teams below 18% faster
+        const band = this.t < 420 ? (this.share[t] > .29 ? .3 : this.share[t] > .24 ? .65 : this.share[t] < .18 ? 1.4 : 1) : 1;
+        const rate = clamp(.11 - this.t * .0001, .04, .11) / (this.power[t] * band);
         if (t === this.player) {
           if (!this.autoAim) this.aim[t] = this.playerAim;
           if (this.firing && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 20 ? 10 : 14); this.cool[t] = .04; }
@@ -487,7 +495,7 @@
         this.powerClock = 0;
         { const lo = this.t < 90 ? .75 : .35, hi = this.t < 90 ? 1.3 : 1.9; for (let t = 0; t < 4; t++) this.power[t] = clamp(this.power[t] * rand(.8, 1.25), lo, hi); }
         // leader snowball after 90s: the top team gets a boost (ref: one team floods)
-        if (this.t > 90) { const lead = this.share.indexOf(Math.max(...this.share)); this.power[lead] = Math.min(1.6, this.power[lead] * 1.05); const last = this.share.indexOf(Math.min(...this.share)); this.power[last] = Math.min(1.9, this.power[last] * 1.2); if (Math.random() < .5) { const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[Math.random() < .5 ? 0 : 3]++; } }
+        if (this.t > 420) { const lead = this.share.indexOf(Math.max(...this.share)); this.power[lead] = Math.min(1.6, this.power[lead] * 1.05); const last = this.share.indexOf(Math.min(...this.share)); this.power[last] = Math.min(1.9, this.power[last] * 1.2); if (Math.random() < .5) { const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[Math.random() < .5 ? 0 : 3]++; } }
       }
       this.heatClock += dt;
       if (this.heatClock > .25) {
@@ -495,7 +503,7 @@
         const h = this.heat, gr = this.grid, f = this.flood ?? -1, kf = Math.pow(.985, 4 * .25 / .25); for (let i = 0; i < h.length; i++) h[i] *= gr[i] === f ? .985 : k;
         this.dirty = true;
       }
-      if (this.t > 240) {
+      if (this.t > 440) {
         const lead = this.share.indexOf(Math.max(...this.share));
         this.flood = lead;
         if (!this.waves.some(w => w.team === lead) && this.t - (this.lastStorm[lead] || -99) > 9) {
@@ -522,7 +530,7 @@
       this.caClock = (this.caClock || 0) + dt;
       /* smoothFront disabled: territory changes only by bullets (strict rule) */
 
-      const active = [], trailMax = this.t > 80 ? 22 : this.t > 25 ? 16 : 12;
+      const active = [], trailMax = 12;
       for (const p of this.shots) {
         p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 260 : trailMax)) p.trail.shift();
         if (p.kind === 2) {
@@ -657,7 +665,7 @@
         this.ammo[t] += dt * (3000 + this.t * 60) * this.power[t] * (this.ammo[t] < 3e6 ? 12 : 1);
       }
       if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
-      else if (this.share.some(v => v > .97 && this.t > 700)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
+      else if (this.share.some(v => v > .97 && this.t > 540)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
     }
   }
 
@@ -690,11 +698,11 @@
     c.beginPath(); c.moveTo(x, bot); c.lineTo(x, top + 4); c.quadraticCurveTo(x, top, x + 4, top); c.lineTo(x + w - 3, top + 2); c.quadraticCurveTo(x + w, top + 3, x + w, top + 6); c.lineTo(x + w, bot); c.closePath();
     c.fillStyle = g; c.fill(); c.strokeStyle = 'rgba(150,185,205,.75)'; c.lineWidth = 1.3; c.stroke();
   }
-  const GRAV = 300, PEG_R = 6.5, PASS_V = 960, BUOY_Y0 = 449, BUOY_Y1 = 520;
-  const LPILLARS = [[0, 12, 300], [42, 24, 345], [116, 26, 395], [209, 13, 450]]; // steep steps
-  const SLOT_LABEL_X = [27, 93, 176, 582, 668, 732];
+  const GRAV = 300, PEG_R = 6.5, PASS_V = 960, BUOY_Y0 = 448, BUOY_Y1 = 476;
+  const LPILLARS = [[0, 6, 392], [92, 6, 404], [136, 6, 418], [180, 6, 432], [260, 6, 446]]; // short stepped cup walls
+  const SLOT_LABEL_X = [49, 117, 161, 223, 537, 599, 643, 711], SLOT_TOP = [398, 410, 424, 438, 438, 424, 410, 398];
   const IPILLARS = [[0, 12, 990], [137, 23, 990], [290, 23, 990], [448, 23, 990], [601, 23, 990], [748, 12, 990]]; // flat, short
-  const PHYS_RECTS = [...LPILLARS.flatMap(([x, w, t]) => [[x, t, x + w, 540], [LEFT - x - w, t, LEFT - x, 540]]), ...IPILLARS.map(([x, w, t]) => [x, t, x + w, 1052])];
+  const PHYS_RECTS = [...LPILLARS.flatMap(([x, w, t]) => [[x, t, x + w, 472], [LEFT - x - w, t, LEFT - x, 472]]), ...IPILLARS.map(([x, w, t]) => [x, t, x + w, 1052])];
   function drawLeftTo(c, game) {
     if (!drawLeftTo.cache) {
       const cv = document.createElement('canvas'); cv.width = LEFT; cv.height = H;
@@ -707,15 +715,15 @@
       for (let y = 200; y < H; y += 200) { b.beginPath(); b.moveTo(0, y + .5); b.lineTo(LEFT, y + .5); b.stroke(); }
       b.save(); b.setLineDash([6, 6]); b.strokeStyle = 'rgba(150,170,190,.35)'; b.beginPath(); b.moveTo(0, 50.5); b.lineTo(LEFT, 50.5); b.stroke(); b.restore();
       // centre lift band + arrows
-      const gl = b.createLinearGradient(0, 455, 0, 520); gl.addColorStop(0, 'rgba(40,150,170,0)'); gl.addColorStop(.5, 'rgba(50,170,190,.22)'); gl.addColorStop(1, 'rgba(40,150,170,0)');
-      b.fillStyle = gl; b.fillRect(GAP[0], 455, GAP[1] - GAP[0], 65);
-      const cg = b.createRadialGradient(380, 487, 5, 380, 487, 120); cg.addColorStop(0, 'rgba(90,210,230,.25)'); cg.addColorStop(1, 'rgba(0,0,0,0)'); b.fillStyle = cg; b.fillRect(260, 440, 240, 95);
+      const gl = b.createLinearGradient(0, 446, 0, 476); gl.addColorStop(0, 'rgba(40,150,170,0)'); gl.addColorStop(.5, 'rgba(50,170,190,.22)'); gl.addColorStop(1, 'rgba(40,150,170,0)');
+      b.fillStyle = gl; b.fillRect(GAP[0], 446, GAP[1] - GAP[0], 30);
+      const cg = b.createRadialGradient(380, 461, 5, 380, 461, 110); cg.addColorStop(0, 'rgba(90,210,230,.25)'); cg.addColorStop(1, 'rgba(0,0,0,0)'); b.fillStyle = cg; b.fillRect(266, 430, 228, 46);
       b.strokeStyle = 'rgba(110,200,215,.55)'; b.lineWidth = 1.4;
-      for (const ax of [253, 316, 380, 443, 506]) for (const [y0, y1] of [[485, 463], [512, 490]]) {
-        b.beginPath(); b.moveTo(ax, y0); b.lineTo(ax, y1); b.moveTo(ax - 3.5, y1 + 5); b.lineTo(ax, y1); b.lineTo(ax + 3.5, y1 + 5); b.stroke();
+      for (let ax = 280; ax <= 480; ax += 12) for (const [y0, y1] of [[472, 456]]) {
+        b.beginPath(); b.moveTo(ax, y0); b.lineTo(ax, y1); b.moveTo(ax - 2.5, y1 + 4); b.lineTo(ax, y1); b.lineTo(ax + 2.5, y1 + 4); b.stroke();
       }
       // ledge groups
-      for (const [g0, g1] of LGROUP) { b.fillStyle = 'rgba(14,30,46,.55)'; b.fillRect(g0, 455, g1 - g0, 85); b.strokeStyle = 'rgba(150,185,205,.7)'; b.lineWidth = 1.3; b.beginPath(); b.moveTo(g0, 540.5); b.lineTo(g1, 540.5); b.stroke(); }
+      for (const [g0, g1] of LGROUP) { b.fillStyle = 'rgba(14,30,46,.55)'; b.fillRect(g0, 400, g1 - g0, 72); b.strokeStyle = 'rgba(150,185,205,.7)'; b.lineWidth = 1.3; b.beginPath(); b.moveTo(g0, 472.5); b.lineTo(g1, 472.5); b.stroke(); }
       // item area
       const ig = b.createLinearGradient(0, 925, 0, 1052); ig.addColorStop(0, 'rgba(20,40,58,.15)'); ig.addColorStop(1, 'rgba(24,48,68,.55)');
       b.fillStyle = ig; b.fillRect(0, 925, LEFT, 127);
@@ -730,7 +738,7 @@
       c.fillStyle = 'rgba(200,208,216,.45)'; c.beginPath(); c.arc(q[0] - 1.2, q[1] - 1.2, 2, 0, 7); c.fill();
     }
     // slot hit tint
-    for (const [x0, x1, sl] of SLOT_X) { const f = game.slotFlash[sl]; if (f && f.life > 0) { c.fillStyle = rgb(TEAMS[f.team].c, .45 * f.life); c.fillRect(x0 + 2, 448, x1 - x0 - 4, 92); } }
+    for (const [x0, x1, sl] of SLOT_X) { const f = game.slotFlash[sl]; if (f && f.life > 0) { c.fillStyle = rgb(TEAMS[f.team].c, .45 * f.life); c.fillRect(x0, SLOT_TOP[sl], x1 - x0, 472 - SLOT_TOP[sl]); } }
     for (let k = 0; k < 5; k++) { const f = game.itemFlash[k]; if (f && f.life > 0) { c.fillStyle = rgb(TEAMS[f.team].c, .3 * f.life); c.fillRect(ITEM_X[k] + 12, 935, ITEM_X[k + 1] - ITEM_X[k] - 24, 117); } }
     // wide translucent trajectory bands for big marbles (ref: long straight light strips)
     c.save(); c.lineCap = 'butt';
@@ -759,16 +767,17 @@
       c.fillStyle = 'rgba(255,255,255,.55)'; c.beginPath(); c.ellipse(m.x - r * .3, m.y - r * .55, r * .4, r * .18, -.4, 0, 7); c.fill();
       const txt = fmt(m.v);
       c.fillStyle = '#fff'; c.textAlign = 'center'; c.textBaseline = 'middle';
-      c.font = `800 ${Math.max(7, Math.round(r * (txt.length > 3 ? .6 : .72)))}px Arial,sans-serif`;
-      c.lineWidth = 2.4; c.strokeStyle = rgb([team.c[0] * .35, team.c[1] * .35, team.c[2] * .35], .9); c.strokeText(txt, m.x, m.y + .5); c.fillText(txt, m.x, m.y + .5);
+      c.font = `900 ${Math.max(11, Math.round(r * (txt.length > 4 ? 1.0 : 1.15)))}px Arial,sans-serif`;
+      c.lineJoin = 'round'; c.lineWidth = 3.5; c.strokeStyle = 'rgba(5,10,18,.95)'; c.strokeText(txt, m.x, m.y + .5); c.fillText(txt, m.x, m.y + .5);
     }
     c.textBaseline = 'alphabetic';
     // pillars + labels drawn above marbles (marbles drop into cups)
-    for (const [x, w, top] of LPILLARS) { pillar(c, x, w, top, 540); pillar(c, LEFT - x - w, w, top, 540); }
-    for (let i = 0; i < 6; i++) {
-      c.fillStyle = '#f2f8fc'; c.textAlign = 'center'; c.font = '800 23px Arial,sans-serif';
-      c.fillText('X' + MULT[i], SLOT_LABEL_X[i], 510);
-      c.font = '700 14px Arial,sans-serif'; c.fillStyle = '#dfeaf2'; c.fillText('' + game.hit[i], SLOT_LABEL_X[i], 528);
+    for (let i = 0; i < 8; i++) { const [x0, x1] = SLOT_X[i]; c.fillStyle = 'rgba(70,95,115,.55)'; c.fillRect(x0, SLOT_TOP[i], x1 - x0, 472 - SLOT_TOP[i]); }
+    for (const [x, w, top] of LPILLARS) { pillar(c, x, w, top, 472); pillar(c, LEFT - x - w, w, top, 472); }
+    for (let i = 0; i < 8; i++) {
+      c.fillStyle = '#f2f8fc'; c.textAlign = 'center'; c.font = `800 ${SLOT_X[i][1] - SLOT_X[i][0] > 60 ? 20 : 16}px Arial,sans-serif`;
+      c.fillText('x' + MULT[i], SLOT_LABEL_X[i], 462);
+      c.font = '700 13px Arial,sans-serif'; c.fillStyle = '#9fb3c2'; c.fillText('' + game.hit[i], SLOT_LABEL_X[i], SLOT_TOP[i] - 6);
     }
     for (const [x, w, top] of IPILLARS) pillar(c, x, w, top, 1052);
     for (let i = 0; i < 5; i++) {
@@ -1101,30 +1110,37 @@
       }
       let bi = 0;
 
-      const age = game.t / MATCH;
-      for (const p of game.shots) {
+      // batched: one stroke per team for all normal-bullet streaks, one fill for all tips (was one draw call per bullet)
+      const bigs = [];
+      for (let tm = 0; tm < 4; tm++) {
+        let n = 0;
+        for (const p of game.shots) {
+          if (p.team !== tm || p.kind === 2) continue;
+          const len = p.trail.length; if (len < 2) continue;
+          const q = p.trail[Math.max(0, len - (p.kind === 3 ? 12 : 6))]; g.moveTo(q[0], q[1]).lineTo(p.x, p.y); n++;
+        }
+        if (n) g.stroke({ width: 1.3, color: TEAMS[tm].hex, alpha: .45 });
+      }
+      let nt = 0;
+      for (const p of game.shots) { if (p.kind === 2) { bigs.push(p); continue; } if ((nt++ & 1) === 0) g.rect(p.x - 1, p.y - 1, 2, 2); }
+      if (nt) g.fill({ color: 0xffffff, alpha: .85 });
+      for (const p of bigs) {
         const team = TEAMS[p.team], len = p.trail.length;
         if (len > 1) {
-          g.moveTo(p.trail[0][0], p.trail[0][1]);
-          for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]);
-          if (p.kind === 2) { const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS; g.stroke({ width: rr * 2, color: team.hex, alpha: 0.72, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * 1.1, color: 0xffffff, alpha: 0.1, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
-          else if (p.kind === 3) g.stroke({ width: 2.4, color: team.hex, alpha: 0.65 });
-          else if (age > .45 || p.kind === 4) g.stroke({ width: 1.2, color: 0xffffff, alpha: 0.28 });
-          else g.stroke({ width: 1.5, color: 0xffffff, alpha: 0.22 });
+          const rr = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS;
+          g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j += 2) g.lineTo(p.trail[j][0], p.trail[j][1]); g.lineTo(p.x, p.y);
+          g.stroke({ width: rr * 2, color: team.hex, alpha: 0.72, cap: 'round', join: 'round' });
+          g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j += 2) g.lineTo(p.trail[j][0], p.trail[j][1]); g.lineTo(p.x, p.y);
+          g.stroke({ width: rr * 1.1, color: 0xffffff, alpha: 0.1, cap: 'round', join: 'round' });
         }
-        if (p.kind === 2) {
-          if (bi >= this.ballPool.length) continue;
-          const r = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS, B = this.ballPool[bi++];
-          B.c.visible = true; B.c.x = p.x; B.c.y = p.y;
-          B.glow.texture = this.teamGlowTex[p.team]; B.glow.width = B.glow.height = r * 3.4;
-          const key = p.team + ':' + (r | 0);
-          if (B.key !== key) { B.key = key; B.ball.clear().circle(0, 0, r).fill({ color: team.hex, alpha: .95 }).circle(0, 0, r * .82).fill({ color: 0x08121f, alpha: .93 }).circle(0, 0, r * .82).stroke({ width: 2, color: team.hex, alpha: 1 }).circle(0, 0, r).stroke({ width: 2.5, color: 0xffffff, alpha: .55 }); }
-          const txt = fmt(p.value); if (B.label.text !== txt) B.label.text = txt;
-          B.label.style.fontSize = clamp(r * .42, 18, 54);
-        } else {
-          // bright tip
-          g.circle(p.x, p.y, p.kind === 3 ? 3.5 : 2.2).fill({ color: 0xffffff, alpha: 0.9 });
-        }
+        if (bi >= this.ballPool.length) continue;
+        const r = clamp(84 + Math.sqrt(p.value / 1e6) * 26, 84, 150) / WS, B = this.ballPool[bi++];
+        B.c.visible = true; B.c.x = p.x; B.c.y = p.y;
+        B.glow.texture = this.teamGlowTex[p.team]; B.glow.width = B.glow.height = r * 3.4;
+        const key = p.team + ':' + (r | 0);
+        if (B.key !== key) { B.key = key; B.ball.clear().circle(0, 0, r).fill({ color: team.hex, alpha: .95 }).circle(0, 0, r * .82).fill({ color: 0x08121f, alpha: .93 }).circle(0, 0, r * .82).stroke({ width: 2, color: team.hex, alpha: 1 }).circle(0, 0, r).stroke({ width: 2.5, color: 0xffffff, alpha: .55 }); }
+        const txt = fmt(p.value); if (B.label.text !== txt) B.label.text = txt;
+        B.label.style.fontSize = clamp(r * .42, 14, 40);
       }
       for (; bi < this.ballPool.length; bi++) this.ballPool[bi].c.visible = false;
       // storm sweep: concentric dotted stream arcs + bright leading edge
