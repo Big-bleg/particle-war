@@ -103,7 +103,7 @@
       this.frame = 0; this.dirty = true; this.terrainAge = 0;
       this.pegs = this.makePegs(); this.lowerPegs = this.makeLowerPegs();
       this.fpsEMA = 60; this._lastNow = 0;
-      this.seedBases(6);
+
       for (let i = 0; i < 16; i++) { this.marble(i % 4); const m = this.marbles[this.marbles.length - 1]; m.x = 130 + i * 27 + rand(-4, 4); m.y = 24 + rand(-3, 3); m.wait = .8 + i * .15; m.v = 32; m.r = 6.5; m.path = [[m.x, m.y]]; }
       // seed silk immediately so t~10s looks dense
 
@@ -250,9 +250,9 @@
         }
       }
       const radius = p.kind === 2 ? 42 : p.kind === 3 ? 14 : p.kind === 1 ? 8 : p.kind === 4 ? 6 : 5.5;
-      this.paint(p.x, p.y, p.team, radius * (1 + Math.min(1.2, this.t / 200)));
+      this.paint(p.x, p.y, p.team, radius * (1 + Math.min(1.2, this.t / 200)) * (this.t < 70 ? .5 + .5 * this.t / 70 : 1));
       if (Math.random() < .35) this.sparks.push({ x: p.x, y: p.y, team: p.team, life: .55 + Math.random() * .3 });
-      if (p.kind === 2) { p.value *= .995; p.life++; return p.life > 240 || p.value < 700e3; }
+      if (p.kind === 2) { p.value *= .995; p.life++; p.v0 = p.v0 || p.value; return p.life > 260 || p.value < p.v0 * .3; }
       return true;
     }
     pushSilk(team, x, y, vx, vy, life) {
@@ -283,9 +283,9 @@
     tickMarbles(dt) {
       for (let t = 0; t < 4; t++) {
         this.nextMarble[t] -= dt;
-        if (this.nextMarble[t] <= 0 && this.marbles.length < 14) { this.marble(t); this.nextMarble[t] = rand(1.1, 2.6) * clamp(1.4 - this.t / 600, .6, 1.4); }
+        if (this.nextMarble[t] <= 0 && this.marbles.length < 20) { this.marble(t); this.nextMarble[t] = rand(.6, 1.5) * clamp(1.4 - this.t / 600, .6, 1.4); }
       }
-      if (this.marbles.length > 10) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
+      if (this.marbles.length > 18) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
       for (const P of [this.pegs, this.lowerPegs]) for (const q of P) {
         q[0] += q[2] * dt; q[1] += q[3] * dt;
         if (q[0] < 40 || q[0] > LEFT - 40) q[2] *= -1;
@@ -393,7 +393,7 @@
           }
         }
         if (t === this.player && this.autoAim) this.playerAim = this.aim[t];
-        this.cool[t] -= dt; if (this.t < 1.2) continue;
+        this.cool[t] -= dt; if (this.t < 2.5) continue;
         const rate = clamp(.11 - this.t * .0001, .04, .11) / this.power[t];
         if (t === this.player) {
           if (!this.autoAim) this.aim[t] = this.playerAim;
@@ -407,7 +407,7 @@
           }
         }
       }
-      if (this.t < 14) { this.growClock = (this.growClock || 0) + dt; if (this.growClock > .4) { this.growClock = 0; this.growBases(6 + Math.min(1, this.t / 10) * 15); } }
+      if (this.t > 2.5 && this.t < 14) { this.growClock = (this.growClock || 0) + dt; if (this.growClock > .4) { this.growClock = 0; this.growBases(5 + Math.min(1, this.t / 10) * 10); } }
       this.tickMarbles(dt);
       this.powerClock += dt;
       if (this.powerClock > 6) {
@@ -430,6 +430,7 @@
           const [bx, by] = BASES[lead];
           this.waves.push({ team: lead, r: 90, a: Math.atan2(G / 2 - by, G / 2 - bx) + rand(-.25, .25), half: .9, sp: 170, life: 0, big: true });
         }
+        if (this.t > 235 && this.t < 380 && !this.shots.some(q => q.kind === 2)) { const lead = (Math.random() * 4) | 0, bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
         if (Math.random() < dt * (this.t > 240 ? .3 : this.t > 120 ? .1 : .015) && this.shots.filter(q => q.kind === 2).length < 3) { const lead = [0, 1, 2, 3][(Math.random() * 4) | 0]; const bag = lead === this.player ? this.items : this.aiItems[lead]; bag[3]++; this.use(lead, 3); }
       } else this.flood = -1;
       // storm sweep waves: expanding arc that floods cells (ignores shields beyond base radius)
@@ -462,7 +463,7 @@
       this.sampleFrontierSparks();
 
       // decorative ribbons (mid-weight trails)
-      if (this.frame % 2 === 0) {
+      if (this.frame % 2 === 0 && this.t > 2.5) {
         for (let t = 0; t < 4; t++) {
           const [bx, by] = BASES[t], a = this.aim[t], n = this.t < 15 ? 6 : this.t < 50 ? 9 : 12;
           for (let k = 0; k < n; k++) {
@@ -488,7 +489,7 @@
 
       // dense silk-thread particles (GPU ParticleContainer target)
       {
-        const spawnN = this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : 170;
+        const spawnN = this.t < 2.5 ? 0 : this.t < 15 ? 100 : this.t < 40 ? 130 : this.t < 90 ? 150 : 170;
         for (let t = 0; t < 4; t++) {
           const [bx, by] = BASES[t], a = this.aim[t];
           const toCenter = Math.atan2(G / 2 - by, G / 2 - bx);
@@ -617,6 +618,7 @@
     for (const m of big) {
       const o = m.path[m.path.length - 1], dx = m.x - o[0], dy = m.y - o[1], L = Math.hypot(dx, dy);
       if (L < 70) continue;
+      { const sp = Math.hypot(m.vx, m.vy) || 1; if ((dx * m.vx + dy * m.vy) / (L * sp) < .8) continue; }
       const k = Math.min(1, 520 / L), sx = m.x - dx * k, sy = m.y - dy * k;
       const gg = c.createLinearGradient(sx, sy, m.x, m.y); gg.addColorStop(0, rgb(TEAMS[m.team].c, 0)); gg.addColorStop(1, rgb(TEAMS[m.team].c, .2));
       c.strokeStyle = gg; c.lineWidth = m.r * 1.7; c.beginPath(); c.moveTo(sx, sy); c.lineTo(m.x, m.y); c.stroke();
@@ -803,7 +805,10 @@
         const sec = new PIXI.Text({ text: '0', style: { fontFamily: 'Arial', fontSize: 16, fontWeight: '700', fill: 0xdcecff } });
         ammo.anchor.set(0, 0.5); sec.anchor.set(0.5, 0.5);
         this.hud.addChild(ammo); this.hud.addChild(sec);
-        this.baseTexts.push({ ammo, sec });
+        const lab = new PIXI.Text({ text: '最强火力\n+1M', style: { fontFamily: '"PingFang SC","Microsoft YaHei",Arial,sans-serif', fontSize: 11, fontWeight: '700', fill: 0xe8f0f6, align: 'center', lineHeight: 14 } });
+        const zero = new PIXI.Text({ text: '0.00', style: { fontFamily: 'Arial', fontSize: 14, fontWeight: '800', fill: 0xffffff } });
+        lab.anchor.set(.5, 1); zero.anchor.set(0, .5); this.hud.addChild(lab); this.hud.addChild(zero);
+        this.baseTexts.push({ ammo, sec, lab, zero });
       }
       this.meterG = new PIXI.Graphics();
       this.hud.addChild(this.meterG);
@@ -871,28 +876,28 @@
       }
       for (let y = 1; y < GS; y++) for (let x = 1; x < GS; x++) { const i = y * GS + x; const m = Math.min(dist[i - 1], dist[i - GS]) + 1; if (m < dist[i]) dist[i] = m; }
       for (let y = GS - 2; y >= 0; y--) for (let x = GS - 2; x >= 0; x--) { const i = y * GS + x; const m = Math.min(dist[i + 1], dist[i + GS]) + 1; if (m < dist[i]) dist[i] = m; }
-      const seed = (game.frame * 7919) | 0;
+      const seed = (game.frame * 7919) | 0, crisp = clamp((game.t - 200) / 120, 0, 1), wk = .55 * (1 - .85 * crisp);
       for (let y = 0; y < N; y++) {
         for (let x = 0; x < N; x++) {
           const i = y * N + x, o = i << 2;
-          let fx = x * k + this.wx[i] * .55, fy = y * k + this.wy[i] * .55;
+          let fx = x * k + this.wx[i] * wk, fy = y * k + this.wy[i] * wk;
           const gx = fx < 0 ? 0 : fx >= GS ? GS - 1 : fx | 0, gy = fy < 0 ? 0 : fy >= GS ? GS - 1 : fy | 0;
           const ci = gy * GS + gx, t = grid[ci];
           // grain hash (changes per rebuild → twinkling broken edge)
           let hsh = (i * 374761393 + seed * 668265263) | 0; hsh = (hsh ^ (hsh >>> 13)) * 1274126177; const rnd = ((hsh ^ (hsh >>> 16)) >>> 0) / 4294967296;
           if (t < 4) {
             const team = TEAMS[t], tx = this.tex[i], fn = this.foamN[i], h = heat[ci];
-            const thr = 1.1 + fn * 3.4;               // bubbly rim thickness 0.6–3 cells
+            const thr = 1.1 + fn * 3.4 * (1 - .75 * crisp);               // bubbly rim thickness 0.6–3 cells
             const dd = dist[ci];
             // dark interior: 18–30% tint + fresh-paint glow that fades (ref: recently swept areas bright)
-            let br = .16 + (t === game.flood ? .35 : .1) * tx + (t === game.flood ? .8 : .5) * h * h;
+            let br = .16 + (t === game.flood ? .22 : .1) * tx + (t === game.flood ? .55 : .5) * h * h;
             // fine pixel texture: per-cell checker + 50px grid lines baked in
             const px = (gx + gy) & 1 ? 1 : .9; br *= px;
             let r = team.c[0] * br, g = team.c[1] * br, b = team.c[2] * br, ea = 0;
             if (t === game.flood && h > .6) { const wh = (h - .6) * (.6 + tx); r += team.hi[0] * wh * .35; g += team.hi[1] * wh * .3; b += team.hi[2] * wh * .15; }
             if (dd < thr) {
               // thin, strong, broken neon edge — grainy dropout
-              const keep = rnd > .18 + (1 - fn) * .25;
+              const keep = rnd > (.18 + (1 - fn) * .25) * (1 - .8 * crisp);
               if (keep) {
                 const core = dd === 0 ? 1 : .75;
                 const w = (rnd > .9 && dd === 0) ? 1 : 0;      // white sparkle pixels
@@ -980,18 +985,18 @@
         if (len > 1) {
           g.moveTo(p.trail[0][0], p.trail[0][1]);
           for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]);
-          if (p.kind === 2) { const rr = clamp(40 + Math.sqrt(p.value / 1e6) * 16, 40, 110); g.stroke({ width: rr * 1.7, color: team.hex, alpha: 0.32, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
+          if (p.kind === 2) { const rr = clamp(62 + Math.sqrt(p.value / 1e6) * 26, 62, 130); g.stroke({ width: rr * 1.7, color: team.hex, alpha: 0.32, cap: 'round', join: 'round' }); g.moveTo(p.trail[0][0], p.trail[0][1]); for (let j = 1; j < len; j++) g.lineTo(p.trail[j][0], p.trail[j][1]); g.stroke({ width: rr * .5, color: team.hex, alpha: 0.35, cap: 'round', join: 'round' }); }
           else if (p.kind === 3) g.stroke({ width: 2.4, color: team.hex, alpha: 0.65 });
           else if (age > .45 || p.kind === 4) g.stroke({ width: 1.2, color: 0xffffff, alpha: 0.28 });
           else g.stroke({ width: 1.5, color: 0xffffff, alpha: 0.22 });
         }
         if (p.kind === 2) {
           if (bi >= this.ballPool.length) continue;
-          const r = clamp(40 + Math.sqrt(p.value / 1e6) * 16, 40, 110), B = this.ballPool[bi++];
+          const r = clamp(62 + Math.sqrt(p.value / 1e6) * 26, 62, 130), B = this.ballPool[bi++];
           B.c.visible = true; B.c.x = p.x; B.c.y = p.y;
           B.glow.texture = this.teamGlowTex[p.team]; B.glow.width = B.glow.height = r * 3.4;
           const key = p.team + ':' + (r | 0);
-          if (B.key !== key) { B.key = key; B.ball.clear().circle(0, 0, r).fill({ color: team.hex, alpha: .5 }).circle(0, 0, r * .72).fill({ color: 0xffffff, alpha: .18 }).circle(0, 0, r).stroke({ width: 4, color: 0xffffff, alpha: .95 }); }
+          if (B.key !== key) { B.key = key; B.ball.clear().circle(0, 0, r).fill({ color: team.hex, alpha: .95 }).circle(0, 0, r * .82).fill({ color: 0x08121f, alpha: .93 }).circle(0, 0, r * .82).stroke({ width: 2, color: team.hex, alpha: 1 }).circle(0, 0, r).stroke({ width: 2.5, color: 0xffffff, alpha: .55 }); }
           const txt = fmt(p.value); if (B.label.text !== txt) B.label.text = txt;
           B.label.style.fontSize = clamp(r * .42, 18, 54);
         } else {
@@ -1012,7 +1017,7 @@
         g.arc(bx, by, w.r, w.a - w.half, w.a + w.half).stroke({ width: 10, color: tm.hex, alpha: .35 });
       }
       // main beam per team: coloured energy ribbon from base along aim until it exits own turf + ~reach
-      for (let t = 0; t < 4; t++) {
+      for (let t = 0; t < 4 && game.t > 2.5; t++) {
         const [bx, by] = BASES[t], a = game.aim[t], ca = Math.cos(a), sa = Math.sin(a);
         let L = 0; const maxL = 760;
         while (L < maxL) { const x = bx + ca * L, y = by + sa * L; if (x < 0 || y < 0 || x >= G || y >= G) break; const o = game.grid[((y / S) | 0) * GS + ((x / S) | 0)]; if (o < 4 && o !== t) break; L += 6; }
@@ -1056,7 +1061,7 @@
         g.circle(x, y - 3, 8).fill({ color: 0x07111c, alpha: 1 }).stroke({ width: 2.2, color: team.hex, alpha: 1 });
         g.circle(x, y - 3, 3).fill({ color: 0xffffff, alpha: 1 });
 
-        const texts = this.baseTexts[t]; const ta = clamp((r - 55) / 30, 0, 1); texts.ammo.alpha = texts.sec.alpha = ta;
+        const texts = this.baseTexts[t]; const ta = clamp((r - 55) / 30, 0, 1); texts.ammo.alpha = texts.sec.alpha = ta; texts.lab.alpha = texts.zero.alpha = 1 - ta; texts.lab.x = x; texts.lab.y = y - r - 4; texts.zero.x = x + r + 6; texts.zero.y = y;
         if (ta < 1) { g.circle(x, y, r).fill({ color: team.hex, alpha: .12 * (1 - ta) }); }
         // ref layout: [shield] 25.86M  /  hub  /  [gun box] 241,410
         texts.ammo.style.fontSize = 21; texts.ammo.text = fmt(game.ammo[t]); texts.ammo.x = x - 22; texts.ammo.y = y - 26; texts.ammo.style.fill = 0xffffff;
