@@ -34,6 +34,11 @@ VMAX = 300.0                             # px/s clamp — slow cap
 BALL_R = 9                               # small so exact 1/mult widths fit (16× = 2r+5)
 PAINT_COST = 0.012
 PROT_R = G / 8.0                        # protected circle radius around each base (~1/8 map)
+BIG_V_REF = 18.0                        # reference numeric value for 「1×」visual size
+BIG_D0 = G / 18.0                       # diameter at val≈BIG_V_REF (reasonable large ball)
+BIG_D_MIN = G / 40.0                    # floor diameter for tiny numbers
+BIG_D_MAX = G / 12.0                    # hard CAP diameter (~PROT_R scale; never 1/5 map)
+POP_IN_F = 10                           # frames to ease-in power-up / ball visual scale
 OPEN_AIM_F = int(2.4 * FPS)              # opening: all guns aim center + spray, then clockwise
                        # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
@@ -72,6 +77,19 @@ def font(sz):
 def ctext(d, cx, y, s, fn, fill, sw=2, sf=(0, 0, 0)):
     d.text((cx - d.textlength(s, font=fn) / 2, y), s, font=fn, fill=fill,
            stroke_width=sw, stroke_fill=sf)
+
+
+
+def big_ball_radius(val, pop=1.0):
+    """Continuous size from numeric value: soft sqrt, hard diameter CAP at BIG_D_MAX.
+
+    diameter = clamp(BIG_D0 * sqrt(val / BIG_V_REF), BIG_D_MIN, BIG_D_MAX)
+    No discrete tiers — only smooth growth with the number, then visual pop-in.
+    """
+    v = max(0.25, float(val))
+    d = BIG_D0 * math.sqrt(v / BIG_V_REF)
+    d = min(BIG_D_MAX, max(BIG_D_MIN, d))
+    return 0.5 * d * float(pop)
 
 
 def fmt_abbr(v):
@@ -192,33 +210,24 @@ class PlinkoLayout:
         self.ridge_h = 0.0
         self.bars = []
         self.low_bars = []
-        # denser regular staggered white pegs (upper + lower); still grid, not random
-        self.peg_r = 7.0
+        # Exactly FOUR rows of sparse staggered pegs (2 upper + 2 lower), not full-width dense
+        self.peg_r = 8.0
         self.pegs = []
-        def add_rows(y0, y1, row_gap, n_base):
-            """Staggered rows from y0..y1; odd rows have n_base, even n_base-1."""
-            sp = (PW - 60) / max(1, n_base - 1)
-            y = float(y0)
-            r = 0
-            while y <= y1:
-                n = n_base if (r % 2 == 0) else max(3, n_base - 1)
-                if n % 2 == 1:
-                    xs = [PW / 2.0]
-                    for k in range(1, n // 2 + 1):
-                        xs += [PW / 2 - k * sp, PW / 2 + k * sp]
-                else:
-                    xs = []
-                    for k in range(n // 2):
-                        xs += [PW / 2 - (k + 0.5) * sp, PW / 2 + (k + 0.5) * sp]
-                xs = [x for x in xs if 28 <= x <= PW - 28]
-                for x in sorted(xs)[:n]:
+        def add_row(y, n, stagger):
+            # leave side margins; fewer pegs per row (~5–6)
+            sp = (PW - 160) / max(1, n - 1)
+            x0 = 80.0 + (sp * 0.5 if stagger else 0.0)
+            for k in range(n):
+                x = x0 + k * sp
+                if 50 <= x <= PW - 50:
                     self.pegs.append((float(x), float(y)))
-                y += row_gap
-                r += 1
-        # upper (spawn → ledge): more rows, tighter
-        add_rows(LAYER1_Y + 55, LEDGE_Y - 28, 36.0, 9)
-        # lower (ledge → item row): denser too
-        add_rows(LEDGE_Y + SLOT_H + 28, ROW_Y - 22, 34.0, 9)
+        # upper half: 2 rows
+        add_row(LAYER1_Y + 110, 5, False)
+        add_row(LAYER1_Y + 175, 6, True)
+        # lower half: 2 rows
+        add_row(LEDGE_Y + SLOT_H + 70, 5, False)
+        add_row(LEDGE_Y + SLOT_H + 140, 6, True)
+
 
     def slot_at(self, x):
         for m, a, b in self.slots:
@@ -374,6 +383,8 @@ class Demo:
         self.palive = z(bool); self.ppow = z(bool); self.pkind = z(np.int8)  # 0 normal 1 scatter 2 big 3 laser-dot
         self.pcur = 0
         self.phit = np.full(NMAX, -1, np.int8)  # base already damaged by this shot
+        self.pscale = np.ones(NMAX, np.float32)   # visual pop-in scale 0→1
+        self.page = np.zeros(NMAX, np.int16)      # frames since spawn (for ease-in)
         # boss
         self.boss = None                 # dict or None
         self.boss_dmg = np.zeros(nt, np.float64)
@@ -708,6 +719,8 @@ class Demo:
                 self.pkind[i] = 2
                 self.ppow[i] = True
                 self.phit[i] = -1
+                self.pscale[i] = 0.0
+                self.page[i] = 0
             return
 
         powered = bool(name and self.power_t[t] > 0 and name != "大球")
@@ -719,7 +732,7 @@ class Demo:
         else:
             # normal: slower + denser small-particle jet
             self.fire_cd[t] = self.fire_period
-            speed = 1.45; energy = 9.0; r0 = 28.0; n_shot = 3; spread = 0.30; kind = 0  # sparse slow white dots
+            speed = 1.45; energy = 9.0; r0 = 28.0; n_shot = 12; spread = 0.42; kind = 0  # density ×4 (n_shot 3→12)
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
             a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
@@ -739,6 +752,8 @@ class Demo:
             self.pkind[i] = kind
             self.ppow[i] = powered
             self.phit[i] = -1
+            self.pscale[i] = 0.0 if powered else 1.0
+            self.page[i] = 0
         if name == "激光" and powered:
             self._laser_beam(t, ang, base_num)
             ev.append(("laser", t))
@@ -804,6 +819,15 @@ class Demo:
         boss_on = self.boss is not None and self.boss["hp"] > 0
         nt = self.nt
         CELL = 6
+
+        # ---- 0) smooth visual pop-in for powered projectiles (ease-out cubic) ----
+        powered_alive = self.palive & self.ppow
+        if powered_alive.any():
+            idx = np.nonzero(powered_alive)[0]
+            self.page[idx] = np.minimum(self.page[idx] + 1, POP_IN_F)
+            # ease-out cubic: 1 - (1-u)^3
+            u = self.page[idx].astype(np.float32) / float(POP_IN_F)
+            self.pscale[idx] = 1.0 - (1.0 - u) ** 3
 
         # ---- 1) pixel-step move + paint ----
         for i in range(NMAX):
@@ -923,7 +947,7 @@ class Demo:
 
         def _rad(i):
             if self.pkind[i] == 2:
-                return 22.0
+                return max(8.0, big_ball_radius(self.pval[i], 1.0) * 0.9)
             if self.ppow[i]:
                 return 10.0
             return 5.5
@@ -1237,7 +1261,7 @@ def build_static_bg(layout: PlinkoLayout, nt):
         ctext(d, X((a + b) / 2), ROW_Y + 18, name, font(12), col, 1)
 
     # map frame
-    d.rectangle((MX - 5, MY - 5, MX + G + 4, MY + G + 4), outline=(70, 230, 255), width=2)
+    d.rectangle((MX - 3, MY - 3, MX + G + 2, MY + G + 2), outline=(70, 230, 255), width=1)
 
     # title bar
     d.rounded_rectangle((MX, 8, MX + G, MY - 12), 10, fill=(14, 18, 40), outline=(60, 120, 200), width=1)
@@ -1254,7 +1278,7 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
     pal = np.array([c for _, c in TEAMS[:nt]] + [NEU, BOSS_C, VOID], np.uint8)
     bg = build_static_bg(layout, nt)
     bg_np = np.asarray(bg)
-    gl = np.zeros((G, G), bool); gl[::32] = True; gl[:, ::32] = True
+    gl = np.zeros((G, G), bool); gl[::48] = True; gl[:, ::48] = True
 
     tmp = out_path + ".video.mp4"
     wav = out_path + ".wav"
@@ -1280,7 +1304,7 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
         img = np.clip(img.astype(np.float32) + fx, 0, 255).astype(np.uint8)
         # grid lines subtle
         img = img.copy()
-        img[gl] = (img[gl].astype(np.int16) + 18).clip(0, 255).astype(np.uint8)
+        img[gl] = (img[gl].astype(np.int16) + 8).clip(0, 255).astype(np.uint8)
         frame[MY:MY + G, MX:MX + G] = img
 
         im = Image.fromarray(frame)
@@ -1340,12 +1364,19 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
             X, Y = MX + bx, MY + by
             c = TEAMS[t][1]
             pr = PROT_R
-            od.ellipse((X - pr, Y - pr, X + pr, Y + pr), fill=(255, 255, 255, 55), outline=(255, 255, 255, 120), width=2)
-            # inner dark hub
-            od.ellipse((X - 16, Y - 16, X + 16, Y + 16), fill=(20, 22, 30, 220))
-            ang = demo.ang[t]
-            L = 34
-            od.line([(X, Y), (X + math.cos(ang) * L, Y + math.sin(ang) * L)], fill=(255, 255, 255, 230), width=4)
+            # shield pop-in: ease ring opacity/scale when shield stacks
+            pop_t = int(demo.shield_pop[t])
+            if demo.shield_hp[t] > 0:
+                u = 1.0 - (pop_t / 24.0) if pop_t > 0 else 1.0
+                ease = 1.0 - (1.0 - min(1.0, u)) ** 3
+                ring_a = int(90 + 80 * ease)
+                fill_a = int(40 + 30 * ease)
+                pr_draw = pr * (0.85 + 0.15 * ease)
+            else:
+                ring_a, fill_a, pr_draw = 70, 35, pr
+            od.ellipse((X - pr_draw, Y - pr_draw, X + pr_draw, Y + pr_draw),
+                       fill=(255, 255, 255, fill_a), outline=(255, 255, 255, ring_a), width=1)
+
             # ammo (top) + score (bottom)
             # (text drawn after composite for crisp glyphs)
         im = Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB")
@@ -1378,17 +1409,21 @@ def render(out_path, preview_prefix, seed=5, nt=4, demo=None, crf=20, snap_at=No
             X = MX + demo.px[i]; Y = MY + demo.py[i]
             frac = val / max(1e-3, demo.pbase[i])
             if demo.ppow[i] and demo.pkind[i] == 2:
-                # ONE huge slow ball ≈ 1/5 map width, light team tint + center number
-                rad = G / 10.0  # diameter = G/5
+                # 大球: continuous size from absolute number (soft √), CAP at BIG_D_MAX; pop-in ease
+                pop = float(demo.pscale[i])
+                rad = big_ball_radius(val, pop)
                 c = TEAMS[t][1]
-                fill = tuple(int(180 + v * 0.25) for v in c)  # light tint
-                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=fill, outline=(255, 255, 255), width=3)
-                ctext(d, X, Y - 18, fmt_abbr(val), font(36), (30, 30, 40), 2)
+                fill = tuple(int(180 + v * 0.25) for v in c)
+                d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=fill, outline=(255, 255, 255), width=2)
+                fs = max(11, int(10 + rad * 0.55))
+                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font(fs), (30, 30, 40), 2)
             elif demo.ppow[i]:
-                rad = max(8.0, 10.0 + 8.0 * frac)
+                pop = float(getattr(demo, "pscale", np.ones(NMAX))[i])
+                rad = max(6.0, (8.0 + 7.0 * frac) * pop)
                 c = TEAMS[t][1]
                 d.ellipse((X - rad, Y - rad, X + rad, Y + rad), fill=c, outline=(255, 255, 255), width=2)
-                ctext(d, X, Y - 10, fmt_abbr(val), font(16), (255, 255, 255), 2)
+                fs = max(11, int(12 + 6 * frac * pop))
+                ctext(d, X, Y - fs * 0.55, fmt_abbr(val), font(fs), (255, 255, 255), 2)
             else:
                 # tiny white dots (2–3px), slow scattered cloud
                 rad = 1.6
