@@ -476,201 +476,176 @@ def render(out_path, seed=7):
         ctext(d, a + iw / 2, ROW + 6, name, font(15), ICOL[ii], 1)
 
     bg_np = np.asarray(bg).copy()
-    tmp = out_path + ".video.mp4"
+    raw_path = out_path + ".raw"
     wav = out_path + ".wav"
-    # clean stale
-    for p in (tmp, wav, out_path):
-        if os.path.exists(p) and p != out_path:
+    for stale in (raw_path, wav, out_path + ".video.mp4", out_path):
+        if os.path.exists(stale):
             try:
-                os.remove(p)
+                os.remove(stale)
             except OSError:
                 pass
-    proc = subprocess.Popen(
-        ["ffmpeg", "-y", "-loglevel", "warning",
-         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
-         "-i", "pipe:0",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
-         "-pix_fmt", "yuv420p",
-         "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-         tmp],
-        stdin=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
     t0 = time.time()
-    # faint grid on display arena
     grid_overlay = np.zeros((G, G, 3), np.float32)
     grid_overlay[::28] += 14
     grid_overlay[:, ::28] += 14
+    frame_bytes = W * H * 3
+    with open(raw_path, "wb") as raw:
+        for fi in range(g.maxf):
+            g.tick()
+            frame = bg_np.copy()
 
-    for fi in range(g.maxf):
-        g.tick()
-        frame = bg_np.copy()
+            img_s = build_gradient_map(g.grid, g.nt)
+            fr_s = frontier_mask(g.grid, g.nt)
+            img_s[fr_s] = np.minimum(
+                img_s[fr_s] * 0.25 + np.array([230, 245, 255], np.float32), 255)
+            small = Image.fromarray(img_s.astype(np.uint8)).resize((G, G), Image.NEAREST)
+            soft = small.filter(ImageFilter.GaussianBlur(radius=1.2))
+            arena = np.asarray(soft).astype(np.float32)
+            fr_big = np.array(
+                Image.fromarray((fr_s.astype(np.uint8) * 255)).resize((G, G), Image.NEAREST)
+            ) > 128
+            arena[fr_big] = np.minimum(
+                arena[fr_big] * 0.3 + np.array([235, 250, 255], np.float32), 255)
+            arena = np.clip(arena + grid_overlay, 0, 255)
+            frame[MY:MY + G, MX:MX + G] = arena.astype(np.uint8)
 
-        # arena fill (low-res → upscale)
-        img_s = build_gradient_map(g.grid, g.nt)
-        fr_s = frontier_mask(g.grid, g.nt)
-        # bright frontier
-        img_s[fr_s] = np.minimum(
-            img_s[fr_s] * 0.25 + np.array([230, 245, 255], np.float32), 255)
-        # upscale nearest for pixel look, then slight blur for soft fills
-        small = Image.fromarray(img_s.astype(np.uint8)).resize((G, G), Image.NEAREST)
-        soft = small.filter(ImageFilter.GaussianBlur(radius=1.2))
-        arena = np.asarray(soft).astype(np.float32)
-        # re-sharpen frontier after blur
-        fr_big = np.array(
-            Image.fromarray((fr_s.astype(np.uint8) * 255)).resize((G, G), Image.NEAREST)
-        ) > 128
-        arena[fr_big] = np.minimum(
-            arena[fr_big] * 0.3 + np.array([235, 250, 255], np.float32), 255)
-        arena = np.clip(arena + grid_overlay, 0, 255)
-        frame[MY:MY + G, MX:MX + G] = arena.astype(np.uint8)
+            im = Image.fromarray(frame)
+            if fi % 2 == 0:
+                edge = Image.fromarray((fr_big.astype(np.uint8) * 200))
+                edge = edge.filter(ImageFilter.GaussianBlur(3))
+                ov = Image.new("RGBA", (G, G), (0, 0, 0, 0))
+                ov.paste((190, 235, 255, 55), (0, 0), edge)
+                arena_rgba = im.crop((MX, MY, MX + G, MY + G)).convert("RGBA")
+                arena_rgba = Image.alpha_composite(arena_rgba, ov)
+                im.paste(arena_rgba.convert("RGB"), (MX, MY))
 
-        im = Image.fromarray(frame)
-        # glow bloom on frontier
-        if fi % 2 == 0:
-            edge = Image.fromarray((fr_big.astype(np.uint8) * 200))
-            edge = edge.filter(ImageFilter.GaussianBlur(3))
-            ov = Image.new("RGBA", (G, G), (0, 0, 0, 0))
-            ov.paste((190, 235, 255, 55), (0, 0), edge)
-            arena_rgba = im.crop((MX, MY, MX + G, MY + G)).convert("RGBA")
-            arena_rgba = Image.alpha_composite(arena_rgba, ov)
-            im.paste(arena_rgba.convert("RGB"), (MX, MY))
+            d = ImageDraw.Draw(im)
+            for si in range(6):
+                ctext(d, PX0 + si * sw + sw / 2, LEDGE + 38,
+                      str(int(g.slot_hits[si])), font(13), (220, 230, 245), 1)
+            for ii in range(5):
+                ctext(d, PX0 + ii * iw + iw / 2, ROW + 38,
+                      str(int(g.global_items[ii])), font(18, True), (255, 255, 255), 1)
+            for m in g.marbles:
+                if not m["alive"]:
+                    continue
+                X, Y = PX0 + m["x"], m["y"]
+                c = TEAMS[m["t"]][1]
+                r = 8 + min(18, math.log10(max(10, m["val"])) * 3.2)
+                d.ellipse((X - r, Y - r, X + r, Y + r), fill=c, outline=(255, 255, 255), width=2)
+                ctext(d, X, Y - 7, fmt_abbr(m["val"]), font(11), (255, 255, 255), 1)
 
-        d = ImageDraw.Draw(im)
-        # hit counts
-        for si in range(6):
-            ctext(d, PX0 + si * sw + sw / 2, LEDGE + 38,
-                  str(int(g.slot_hits[si])), font(13), (220, 230, 245), 1)
-        for ii in range(5):
-            ctext(d, PX0 + ii * iw + iw / 2, ROW + 38,
-                  str(int(g.global_items[ii])), font(18, True), (255, 255, 255), 1)
-        # marbles
-        for m in g.marbles:
-            if not m["alive"]:
-                continue
-            X, Y = PX0 + m["x"], m["y"]
-            c = TEAMS[m["t"]][1]
-            r = 8 + min(18, math.log10(max(10, m["val"])) * 3.2)
-            d.ellipse((X - r, Y - r, X + r, Y + r), fill=c, outline=(255, 255, 255), width=2)
-            ctext(d, X, Y - 7, fmt_abbr(m["val"]), font(11), (255, 255, 255), 1)
+            d.rectangle((MX - 2, MY - 2, MX + G + 1, MY + G + 1), outline=(80, 180, 255), width=2)
 
-        d.rectangle((MX - 2, MY - 2, MX + G + 1, MY + G + 1), outline=(80, 180, 255), width=2)
+            big_list = []
+            for i in range(NMAX):
+                if not g.palive[i]:
+                    continue
+                t = int(g.ptm[i])
+                X, Y = MX + g.px[i], MY + g.py[i]
+                kind = int(g.pkind[i])
+                c = TEAMS[t][2]
+                if kind == 2:
+                    big_list.append((i, t, X, Y))
+                elif kind == 1:
+                    vx, vy = float(g.pvx[i]), float(g.pvy[i])
+                    L = 16
+                    d.line((X - vx * L * 0.15, Y - vy * L * 0.15,
+                            X + vx * 0.35, Y + vy * 0.35), fill=c, width=2)
+                    d.ellipse((X - 2, Y - 2, X + 2, Y + 2), fill=(255, 255, 255))
+                else:
+                    d.ellipse((X - 2.2, Y - 2.2, X + 2.2, Y + 2.2), fill=(255, 255, 255))
 
-        # projectiles — batch dots/beams first, bigs with alpha
-        big_list = []
-        for i in range(NMAX):
-            if not g.palive[i]:
-                continue
-            t = int(g.ptm[i])
-            X, Y = MX + g.px[i], MY + g.py[i]
-            kind = int(g.pkind[i])
-            c = TEAMS[t][2]
-            if kind == 2:
-                big_list.append((i, t, X, Y))
-            elif kind == 1:
-                vx, vy = float(g.pvx[i]), float(g.pvy[i])
-                L = 16
-                d.line((X - vx * L * 0.15, Y - vy * L * 0.15,
-                        X + vx * 0.35, Y + vy * 0.35), fill=c, width=2)
-                d.ellipse((X - 2, Y - 2, X + 2, Y + 2), fill=(255, 255, 255))
-            else:
-                d.ellipse((X - 2.2, Y - 2.2, X + 2.2, Y + 2.2), fill=(255, 255, 255))
+            if big_list:
+                ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                od = ImageDraw.Draw(ov)
+                for i, t, X, Y in big_list:
+                    pop = float(g.pscale[i])
+                    val = float(g.pval[i])
+                    rad = min(G / 13, 20 + math.sqrt(val / 1e6) * 11) * max(0.15, pop)
+                    col = TEAMS[t][1]
+                    od.ellipse((X - rad, Y - rad, X + rad, Y + rad),
+                               fill=(col[0], col[1], col[2], 95),
+                               outline=(255, 255, 255, 210), width=3)
+                im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
+                d = ImageDraw.Draw(im)
+                for i, t, X, Y in big_list:
+                    ctext(d, X, Y - 14, fmt_abbr(g.pval[i]), font(22, True), (255, 255, 255), 1)
 
-        if big_list:
+            for sx, sy, life, col in g.sparks:
+                d.ellipse((MX + sx - 1.8, MY + sy - 1.8, MX + sx + 1.8, MY + sy + 1.8), fill=col)
+
             ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             od = ImageDraw.Draw(ov)
-            for i, t, X, Y in big_list:
-                pop = float(g.pscale[i])
-                val = float(g.pval[i])
-                rad = min(G / 13, 20 + math.sqrt(val / 1e6) * 11) * max(0.15, pop)
-                col = TEAMS[t][1]
-                od.ellipse((X - rad, Y - rad, X + rad, Y + rad),
-                           fill=(col[0], col[1], col[2], 95),
-                           outline=(255, 255, 255, 210), width=3)
+            for t in range(g.nt):
+                bx, by = g.bases[t]
+                X, Y = MX + bx, MY + by
+                c = TEAMS[t][1]
+                pr = PROT_R
+                for w, aa in ((pr + 8, 50), (pr + 2, 110), (pr - 10, 60)):
+                    od.ellipse((X - w, Y - w, X + w, Y + w), outline=(*c, aa + 50), width=3)
+                od.ellipse((X - pr, Y - pr, X + pr, Y + pr), fill=(*c, 40))
+                ca, sa = math.cos(g.ang[t]), math.sin(g.ang[t])
+                od.line((X, Y, X + ca * (pr - 8), Y + sa * (pr - 8)),
+                        fill=(255, 255, 255, 230), width=4)
             im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
             d = ImageDraw.Draw(im)
-            for i, t, X, Y in big_list:
-                ctext(d, X, Y - 14, fmt_abbr(g.pval[i]), font(22, True), (255, 255, 255), 1)
+            for t in range(g.nt):
+                bx, by = g.bases[t]
+                X, Y = MX + bx, MY + by
+                ctext(d, X, Y - 30, fmt_abbr(g.ammo[t]), font(28, True), (255, 255, 255), 2)
+                ctext(d, X, Y + 10, fmt_abbr(g.score2[t]), font(14), TEAMS[t][2], 1)
+                ctext(d, X, Y + 28, f"盾{fmt_abbr(g.shield[t])}", font(12), (160, 230, 255), 1)
 
-        for sx, sy, life, col in g.sparks:
-            d.ellipse((MX + sx - 1.8, MY + sy - 1.8, MX + sx + 1.8, MY + sy + 1.8), fill=col)
+            def meter(x0, shares_side):
+                d.rectangle((x0, MY, x0 + 16, MY + G), fill=(14, 18, 36), outline=(50, 80, 120))
+                y = MY + G
+                for t in shares_side:
+                    hgt = max(2, g.share[t] * G)
+                    d.rectangle((x0 + 1, y - hgt, x0 + 15, y), fill=TEAMS[t][1])
+                    y -= hgt
+                for pct, yy in ((0.25, 0.75), (0.5, 0.5), (0.75, 0.25), (1.0, 0.0)):
+                    d.text((x0 - 4, MY + G * yy - 6), f"{int(pct * 100)}%",
+                           font=font(9), fill=(140, 160, 190))
+            meter(MX - 26, [0, 2])
+            meter(MX + G + 8, [1, 3])
+            for t, (ox, oy) in enumerate(((0.14, 0.10), (0.86, 0.10), (0.14, 0.90), (0.86, 0.90))):
+                ctext(d, MX + G * ox, MY + G * oy, f"{g.share[t] * 100:.1f}%",
+                      font(14), TEAMS[t][2], 1)
+                bx = MX + G * ox
+                by = MY + G * oy + 22
+                d.ellipse((bx - 11, by - 11, bx + 11, by + 11),
+                          fill=TEAMS[t][1], outline=(255, 255, 255))
+                ctext(d, bx, by - 8, str(int(g.level[t])), font(12), (255, 255, 255), 1)
 
-        # base rings
-        ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        od = ImageDraw.Draw(ov)
-        for t in range(g.nt):
-            bx, by = g.bases[t]
-            X, Y = MX + bx, MY + by
-            c = TEAMS[t][1]
-            pr = PROT_R
-            for w, aa in ((pr + 8, 50), (pr + 2, 110), (pr - 10, 60)):
-                od.ellipse((X - w, Y - w, X + w, Y + w), outline=(*c, aa + 50), width=3)
-            od.ellipse((X - pr, Y - pr, X + pr, Y + pr), fill=(*c, 40))
-            ca, sa = math.cos(g.ang[t]), math.sin(g.ang[t])
-            od.line((X, Y, X + ca * (pr - 8), Y + sa * (pr - 8)),
-                    fill=(255, 255, 255, 230), width=4)
-        im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
-        d = ImageDraw.Draw(im)
-        for t in range(g.nt):
-            bx, by = g.bases[t]
-            X, Y = MX + bx, MY + by
-            ctext(d, X, Y - 30, fmt_abbr(g.ammo[t]), font(28, True), (255, 255, 255), 2)
-            ctext(d, X, Y + 10, fmt_abbr(g.score2[t]), font(14), TEAMS[t][2], 1)
-            ctext(d, X, Y + 28, f"🛡{fmt_abbr(g.shield[t])}", font(12), (160, 230, 255), 1)
+            ctext(d, MX + G / 2, MY - 30, "Douyin 风格复刻 · 成长演示", font(22), (200, 230, 255), 1)
+            d.text((MX + 10, MY + 8), f"{fi / FPS:04.1f}s", font=font(16), fill=(180, 200, 230))
+            phase = "早期点射" if g.phase == 0 else "中期光束"
+            d.text((MX + G - 130, MY + 8), phase, font=font(14), fill=(255, 220, 140))
 
-        # side meters
-        def meter(x0, shares_side):
-            d.rectangle((x0, MY, x0 + 16, MY + G), fill=(14, 18, 36), outline=(50, 80, 120))
-            y = MY + G
-            for t in shares_side:
-                hgt = max(2, g.share[t] * G)
-                d.rectangle((x0 + 1, y - hgt, x0 + 15, y), fill=TEAMS[t][1])
-                y -= hgt
-            for pct, yy in ((0.25, 0.75), (0.5, 0.5), (0.75, 0.25), (1.0, 0.0)):
-                d.text((x0 - 4, MY + G * yy - 6), f"{int(pct * 100)}%",
-                       font=font(9), fill=(140, 160, 190))
-        meter(MX - 26, [0, 2])  # left: red + blue
-        meter(MX + G + 8, [1, 3])  # right: green + orange
-        for t, (ox, oy) in enumerate(((0.14, 0.10), (0.86, 0.10), (0.14, 0.90), (0.86, 0.90))):
-            ctext(d, MX + G * ox, MY + G * oy, f"{g.share[t] * 100:.1f}%",
-                  font(14), TEAMS[t][2], 1)
-            bx = MX + G * ox
-            by = MY + G * oy + 22
-            d.ellipse((bx - 11, by - 11, bx + 11, by + 11),
-                      fill=TEAMS[t][1], outline=(255, 255, 255))
-            ctext(d, bx, by - 8, str(int(g.level[t])), font(12), (255, 255, 255), 1)
+            if fi < 40:
+                ov = Image.new("RGBA", (W, H), (0, 0, 0, 150))
+                od = ImageDraw.Draw(ov)
+                ctext(od, W / 2, H / 2 - 36, "小球领土战争 · 复刻演示", font(46), (220, 240, 255), 2)
+                ctext(od, W / 2, H / 2 + 28, "开局四色推角 → 点射 → 霓虹光束", font(24), (180, 210, 240), 1)
+                im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
 
-        ctext(d, MX + G / 2, MY - 30, "Douyin 风格复刻 · 成长演示", font(22), (200, 230, 255), 1)
-        d.text((MX + 10, MY + 8), f"{fi / FPS:04.1f}s", font=font(16), fill=(180, 200, 230))
-        phase = "早期点射" if g.phase == 0 else "中期光束"
-        d.text((MX + G - 130, MY + 8), phase, font=font(14), fill=(255, 220, 140))
+            arr = np.asarray(im, dtype=np.uint8)
+            assert arr.shape == (H, W, 3) and arr.flags["C_CONTIGUOUS"]
+            raw.write(arr.tobytes())
+            if fi % 60 == 0:
+                print(f"  frame {fi}/{g.maxf} ({fi / FPS:.1f}s) elapsed {time.time() - t0:.1f}s "
+                      f"shares={[round(float(s), 3) for s in g.share]} hits={g.slot_hits.tolist()}",
+                      flush=True)
+            if fi in (45, 150, 300, 450):
+                im.save(out_path.replace(".mp4", f"_preview_{fi:03d}.png"))
 
-        if fi < 40:
-            ov = Image.new("RGBA", (W, H), (0, 0, 0, 150))
-            od = ImageDraw.Draw(ov)
-            ctext(od, W / 2, H / 2 - 36, "小球领土战争 · 复刻演示", font(46), (220, 240, 255), 2)
-            ctext(od, W / 2, H / 2 + 28, "开局四色推角 → 点射 → 霓虹光束", font(24), (180, 210, 240), 1)
-            im = Image.alpha_composite(im.convert("RGBA"), ov).convert("RGB")
+    raw_size = os.path.getsize(raw_path)
+    expect = g.maxf * frame_bytes
+    print(f"  raw size={raw_size} expect={expect}", flush=True)
+    if raw_size != expect:
+        raise RuntimeError(f"raw frame dump incomplete: {raw_size} != {expect}")
 
-        try:
-            proc.stdin.write(np.asarray(im, dtype=np.uint8).tobytes())
-        except BrokenPipeError as e:
-            err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
-            raise RuntimeError(f"ffmpeg broken pipe at frame {fi}: {err[:800]}") from e
-        if fi % 60 == 0:
-            print(f"  frame {fi}/{g.maxf} ({fi / FPS:.1f}s) elapsed {time.time() - t0:.1f}s "
-                  f"shares={[round(float(s), 3) for s in g.share]} hits={g.slot_hits.tolist()}",
-                  flush=True)
-        if fi in (45, 150, 300, 450):
-            im.save(out_path.replace(".mp4", f"_preview_{fi:03d}.png"))
-
-    proc.stdin.close()
-    err_b = proc.stderr.read() if proc.stderr else b""
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"ffmpeg video encode failed rc={rc}: {err_b.decode('utf-8','replace')[:800]}")
-    print(f"  video tmp size={os.path.getsize(tmp)}  ffmpeg warn: {err_b.decode('utf-8','replace')[:200]!r}", flush=True)
-    # soft ambient pad
     n = int((g.maxf / FPS + 0.4) * 44100)
     t = np.arange(n) / 44100.0
     a = (0.035 * np.sin(2 * np.pi * 82 * t)
@@ -679,14 +654,18 @@ def render(out_path, seed=7):
     with wave.open(wav, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(44100)
         w.writeframes((np.clip(a, -1, 1) * 28000).astype(np.int16).tobytes())
+
+    print("  encoding H.264…", flush=True)
     subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp, "-i", wav,
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
+         "-i", raw_path, "-i", wav,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "128k", "-shortest",
          "-movflags", "+faststart", out_path],
         check=True,
     )
-    os.remove(tmp); os.remove(wav)
+    os.remove(raw_path); os.remove(wav)
     print(f"done → {out_path}", flush=True)
     return g
 
