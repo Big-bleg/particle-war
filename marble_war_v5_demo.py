@@ -40,6 +40,7 @@ BIG_D0 = G / 18.0                       # diameter at val≈BIG_V_REF (reasonabl
 BIG_D_MIN = G / 40.0                    # floor diameter for tiny numbers
 BIG_D_MAX = G / 12.0                    # hard CAP diameter (~PROT_R scale; never 1/5 map)
 POP_IN_F = 10                           # frames to ease-in power-up / ball visual scale
+ITEM_FIRE_HALF = math.radians(42)      # item shots only if |ang − inward| ≤ 42° (map-interior arc)
 OPEN_AIM_F = int(2.4 * FPS)              # opening: all guns aim center + spray, then clockwise
                        # number lost per enemy pixel painted (real-time decay)
 NMAX = 8000
@@ -219,35 +220,22 @@ class PlinkoLayout:
         self.ridge_h = 0.0
         self.bars = []
         self.low_bars = []
-        # Upper 4 rows + lower 4 rows; dense staggered (tight x-spacing, mid-gap fillers)
-        self.peg_r = 7.5
+        # Upper 4 + lower 4 rows; ~½ prior x-count; 2× vertical row gap; staggered (no mid fillers)
+        self.peg_r = 8.0
         self.pegs = []
         def add_row(y, stagger):
-            """Full-width staggered row with tight spacing + mid-gap filler pegs."""
-            margin = 42.0
-            sp = 48.0  # tight left-right spacing (was ~wide)
-            xs = []
+            margin = 55.0
+            sp = 96.0  # ~2× prior spacing → roughly half horizontal pegs
             x = margin + (sp * 0.5 if stagger else 0.0)
             while x <= PW - margin:
-                xs.append(x)
+                self.pegs.append((float(x), float(y)))
                 x += sp
-            # insert extra peg into each middle gap → denser pattern
-            filled = []
-            for i, x in enumerate(xs):
-                filled.append(x)
-                if i + 1 < len(xs):
-                    filled.append(0.5 * (xs[i] + xs[i + 1]))
-            for x in filled:
-                if 36 <= x <= PW - 36:
-                    self.pegs.append((float(x), float(y)))
-        # upper zone (spawn → ledge): 4 rows
-        uy0 = LAYER1_Y + 85
-        ugap = 42.0
+        uy0 = LAYER1_Y + 70
+        ugap = 84.0   # 2× prior 42
         for r in range(4):
             add_row(uy0 + r * ugap, stagger=(r % 2 == 1))
-        # lower zone (below 倍率 → items): 4 rows
-        ly0 = LEDGE_Y + SLOT_H + 45
-        lgap = 40.0
+        ly0 = LEDGE_Y + SLOT_H + 36
+        lgap = 80.0   # 2× prior 40
         for r in range(4):
             add_row(ly0 + r * lgap, stagger=(r % 2 == 1))
 
@@ -707,6 +695,19 @@ class Demo:
                 best_sc, best = sc, (px, py, dist, power)
         return best
 
+
+    def inward_ang(self, t):
+        bx, by = self.bases[t]
+        return math.atan2(G / 2 - by, G / 2 - bx)
+
+    def in_item_fire_arc(self, t, ang=None):
+        """True when barrel faces map interior within ±ITEM_FIRE_HALF of inward ray."""
+        if ang is None:
+            ang = float(self.ang[t])
+        inward = self.inward_ang(t)
+        d = (ang - inward + math.pi) % (2 * math.pi) - math.pi
+        return abs(d) <= ITEM_FIRE_HALF
+
     def fire_team(self, t, ev):
         if not self.alive_t[t]:
             return
@@ -715,47 +716,50 @@ class Demo:
         bx, by = self.bases[t]
         ang = self.ang[t]
         name = self.power[t]
-        # projectile number = left mult × powerup effect
         mult_vis = max(1, int(self.mult_bonus[t]))
-        # use active power value if any, else small basic shot
         if name and self.power_t[t] > 0:
             base_num = float(self.power_val[t])
             kind = {"散射": 1, "大球": 2, "激光": 3, "护盾": 0}.get(name, 0)
         else:
-            base_num = 40.0 * mult_vis   # normal shot: paints but shows no number
+            base_num = 40.0 * mult_vis
             kind = 0
-        # 大球: exactly one huge slow numbered ball per cast
-        if self.big_pending[t]:
-            self.big_pending[t] = False
-            self.fire_cd[t] = self.fire_period  # don't block normal jets long
-            ids = self._alloc(1)
-            for i in ids:
-                self.px[i] = bx + math.cos(ang) * 44.0
-                self.py[i] = by + math.sin(ang) * 44.0
-                sp = 3.2  # slow but crosses map in ~5s (demo window)
-                self.pvx[i] = math.cos(ang) * sp
-                self.pvy[i] = math.sin(ang) * sp
-                self.ptm[i] = t
-                self.pval[i] = float(self.big_energy[t])
-                self.pbase[i] = float(self.big_energy[t])
-                self.palive[i] = True
-                self.pkind[i] = 2
-                self.ppow[i] = True
-                self.phit[i] = -1
-                self.pscale[i] = 0.0
-                self.page[i] = 0
-            return
+        arc_ok = self.in_item_fire_arc(t, ang)
 
-        powered = bool(name and self.power_t[t] > 0 and name != "大球")
-        if powered:
-            # other power-ups: one numbered ball at a time (not a spray)
+        # 大球: fire ONLY inside interior arc; otherwise keep pending + fire normals
+        if self.big_pending[t]:
+            if not arc_ok:
+                pass  # fall through to normals; pending kept
+            else:
+                self.big_pending[t] = False
+                self.fire_cd[t] = self.fire_period
+                ids = self._alloc(1)
+                for i in ids:
+                    self.px[i] = bx + math.cos(ang) * 44.0
+                    self.py[i] = by + math.sin(ang) * 44.0
+                    sp = 3.2
+                    self.pvx[i] = math.cos(ang) * sp
+                    self.pvy[i] = math.sin(ang) * sp
+                    self.ptm[i] = t
+                    self.pval[i] = float(self.big_energy[t])
+                    self.pbase[i] = float(self.big_energy[t])
+                    self.palive[i] = True
+                    self.pkind[i] = 2
+                    self.ppow[i] = True
+                    self.phit[i] = -1
+                    self.pscale[i] = 0.0
+                    self.page[i] = 0
+                return
+
+        powered = bool(name and self.power_t[t] > 0 and name != "大球" and name != "护盾")
+        if powered and arc_ok:
+            # 散射 / 激光 numbered ball — only in fire arc
             self.fire_cd[t] = self.fire_period_pow
             speed = 3.4
-            energy = base_num; r0 = 38.0; n_shot = 1; spread = 0.0; kind = 1  # medium numbered ball (only 大球 is huge)
+            energy = base_num; r0 = 38.0; n_shot = 1; spread = 0.0; kind = 1
         else:
             # normal: slower + denser small-particle jet
             self.fire_cd[t] = self.fire_period
-            speed = 3.6; energy = 10.0; r0 = 28.0; n_shot = 12; spread = 0.42; kind = 0  # density ×4; visible travel
+            speed = 3.6; energy = 10.0; r0 = 28.0; n_shot = 30; spread = 0.50; kind = 0  # ~2.5× denser (was 12)
         ids = self._alloc(n_shot)
         for k, i in enumerate(ids):
             a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
@@ -777,7 +781,7 @@ class Demo:
             self.phit[i] = -1
             self.pscale[i] = 0.0 if powered else 1.0
             self.page[i] = 0
-        if name == "激光" and powered:
+        if name == "激光" and powered and arc_ok:
             self._laser_beam(t, ang, base_num)
             ev.append(("laser", t))
 
