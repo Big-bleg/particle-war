@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#030811">
+  <title>War4Balls · 四色领土战争</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="game-shell">
+    <canvas id="game" width="1920" height="1080" aria-label="War4Balls 四色领土战争"></canvas>
+    <div id="controls" class="controls" aria-label="游戏控制">
+      <span id="timer">00:00</span><span id="shareLabel">等待开战</span>
+      <label><input type="checkbox" id="autoAim" checked> 自动旋转</label>
+      <button id="btnPause" type="button">暂停</button><button id="btnRestart" type="button">重开</button>
+    </div>
+    <section id="overlay" class="overlay">
+      <div class="panel" id="startpanel">
+        <div class="eyebrow">WAR 4 BALLS · PIXEL TERRITORY</div>
+        <h1>四色领土战争</h1>
+        <p>选择一个阵营，守住基地并把你的颜色推过整片战场。</p>
+        <div class="colors">
+          <button class="color-btn red" data-team="0"><i></i>红队<span>左上</span></button>
+          <button class="color-btn green" data-team="1"><i></i>绿队<span>右上</span></button>
+          <button class="color-btn blue" data-team="2"><i></i>蓝队<span>左下</span></button>
+          <button class="color-btn orange" data-team="3"><i></i>橙队<span>右下</span></button>
+        </div>
+        <div class="howto"><b>鼠标 / 触摸</b> 瞄准并按住战场开火　·　<strong>1–5</strong> 使用弹珠台道具<br>点击下方五个图标也能施放道具；关闭自动旋转可手动瞄准。</div>
+        <div style="margin-top:14px"><button id="btnQuick" type="button">直接开战（红队）</button></div>
+        <small>弹珠落入倍率槽后会为对应阵营补充弹药和战术道具 · 也可按键盘 1–4 选队 · 战场渲染：PixiJS WebGL</small>
+      </div>
+      <div class="panel hidden" id="endpanel"><div class="eyebrow">MATCH RESULT</div><h1>对局结束</h1><div id="endMsg"></div><button id="btnAgain" type="button">再来一局</button></div>
+    </section>
+  </main>
+  <script src="vendor/pixi.min.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
