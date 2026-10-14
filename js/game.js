@@ -80,6 +80,7 @@
 
   /* ===================== SIMULATION ===================== */
   class Game {
+    static expose() { window.__W4B_Game = Game; }
     constructor(player) {
       this.player = player; this.t = 0; this.paused = false; this.over = false; this.winner = -1;
       this.autoAim = true; this.firing = false; this.autoFire = true;
@@ -97,7 +98,7 @@
       // asymmetric momentum: each team has a drifting fire-power multiplier
       this.power = [0, 1, 2, 3].map(() => rand(.8, 1.25)); this.powerClock = 0;
       this.sweepPh = [0, 1, 2, 3].map(() => rand(0, 6.28)); this.sweepSp = [0, 1, 2, 3].map(() => rand(.15, .4));
-      this.events = []; this.lasers = []; this.stat = { die: 0, paint: 0, cancel: 0 }; this.opened = false; this.opening = null; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (t % 2 ? -1 : 1) * rand(.45, .7));
+      this.events = []; this.lasers = []; this.stat = { die: 0, paint: 0, cancel: 0 }; this.opened = false; this.opening = null; this.lock = [null, null, null, null]; this.spin = [0, 1, 2, 3].map(t => (Math.random() < .5 ? -1 : 1) * rand(.45, .7)); // random direction per team (fixed signs were not rotation-symmetric)
       this.ribbons = []; this.silk = new Float32Array(SILK_CAP * 7); this.silkCount = 0;
       this.stars = Array.from({ length: 220 }, () => [rand(0, G), rand(0, G), rand(.2, 1), rand(.5, 2.2)]);
       this.frame = 0; this.dirty = true; this.terrainAge = 0;
@@ -199,7 +200,7 @@
     }
     award(team, slot, value) {
       const v = value * MULT[slot];
-      this.score[team] += v; this.ammo[team] = Math.min(999e6, this.ammo[team] + v * .004 * (1 + this.t / 90));
+      (this.dbgCup ||= [0, 0, 0, 0])[team] += v; this.score[team] += v; this.ammo[team] = Math.min(999e6, this.ammo[team] + v * .004 * (1 + this.t / 90));
       this.slotFlash[slot] = { team, life: 1 };
     }
     spawn(team, kind = 0, count = null, angle = null) {
@@ -212,7 +213,7 @@
       const speed = kind === 5 ? 5.2 : kind === 2 ? 2.2 : kind === 3 ? 9 : kind === 4 ? 4.6 : kind === 1 ? 5 : 4.2;
       const spread = kind === 2 ? 0 : kind === 3 ? .02 : kind === 5 ? .349 / Math.max(1, (count ?? 48) - 1) : .011; // normal jet: tight (~10° total)
       const cost = kind === 2 ? 0 : kind === 3 ? 0 : n * 22;
-      this.ammo[team] = Math.max(0, this.ammo[team] - cost);
+      this.ammo[team] = Math.max(0, this.ammo[team] - cost); (this.dbgFire ||= [0, 0, 0, 0])[team] += n;
       for (let k = 0; k < n && this.shots.length < MAX_SHOTS; k++) {
         const a = baseAng + (k - (n - 1) / 2) * spread + (kind === 5 ? rand(-.03, .03) : rand(-.008, .008));
         const v = kind === 5 ? rand(speed * .7, speed * 1.25) : rand(speed * .9, speed * 1.12);
@@ -267,7 +268,7 @@
       if (owner < 4 && p.kind !== 5 && !this.dead[owner]) {
         const [bx, by] = BASES[owner];
         if (Math.hypot(p.x - bx, p.y - by) < 100 / WS) {
-          this.hitBase(owner, 1500 * this.lateK());
+          this.hitBase(owner, 1500 * this.lateK(owner));
           this.sparks.push({ x: p.x, y: p.y, team: owner, life: .7 });
           return true;
         }
@@ -298,7 +299,7 @@
       this.pushSilk(t, bx + Math.cos(a) * dist, by + Math.sin(a) * dist, Math.cos(a) * sp, Math.sin(a) * sp, .4 + Math.random() * .9);
     }
     hitBase(b, dmg) {
-      if (this.dead[b]) return;
+      if (this.dead[b]) return; (this.dbgDmg ||= [0, 0, 0, 0])[b] += dmg;
       this.hp[b] = Math.max(0, this.hp[b] - dmg);
       if (this.hp[b] <= 0) {
         this.dead[b] = true; this.ammo[b] = 0; this.lock[b] = null;
@@ -308,8 +309,20 @@
         this.events.push({ t: this.t, team: b, kind: 'eliminated' });
       }
     }
-    lateK() { const x = Math.max(0, this.t - 465) / 60; return 1 + x * x * .45; } // late-game shield damage ramp (eliminations ~7–10 min)
+    lateK(b) {
+      // staggered eliminations: kill windows at ~7:10 / 8:40 / 10:10 by alive count; only the weakest alive base takes the ramp,
+      // and after 10:40 every non-leader ramps hard so a last survivor is reliable by 11:00
+      const alive = this.dead.filter(d => !d).length; if (alive <= 1) return 1;
+      const T = [430, 520, 610][4 - alive] ?? 610, al = [0, 1, 2, 3].filter(t => !this.dead[t]);
+      const weak = al.reduce((a, t) => (this.share[t] + this.hp[t] / 4e7 < this.share[a] + this.hp[a] / 4e7 ? t : a), al[0]);
+      const lead = al.reduce((a, t) => (this.share[t] > this.share[a] ? t : a), al[0]);
+      let k = 1;
+      if (b === weak && this.t > T) { const x = (this.t - T) / 20; k = 1 + x * x * 4; }
+      if (this.t > 615 && b !== lead) { const x = (this.t - 615) / 6; k = Math.max(k, 1 + x * x * 20); }
+      return k;
+    } // late-game shield damage ramp (eliminations ~7–10 min)
     giveItem(team, type) {
+      (this.dbgItem ||= [0, 0, 0, 0])[team]++;
       if (team === this.player) this.items[type] = Math.min(99, this.items[type] + 1);
       else this.aiItems[team][type] = Math.min(99, this.aiItems[team][type] + 1);
       if (type === 2) this.shield[team] = Math.min(1, this.shield[team] + .08);
@@ -318,7 +331,7 @@
     tickMarbles(dt) {
       for (let t = 0; t < 4; t++) {
         this.nextMarble[t] -= dt;
-        if (this.nextMarble[t] <= 0 && this.marbles.length < 9) { this.marble(t); this.nextMarble[t] = rand(1.4, 3.2) * clamp(1.4 - this.t / 600, .6, 1.4); }
+        if (this.nextMarble[t] <= 0 && this.marbles.reduce((n, q) => n + (q.team === t && !q.lift), 0) < 2) /* per-team cap: a shared cap let team 0 grab every free slot (red bias) */ { this.marble(t); this.nextMarble[t] = rand(1.75, 3.9) * clamp(1.4 - this.t / 600, .6, 1.4); }
       }
       if (m => 0, this.marbles.length > 18) this.marbles = this.marbles.filter(m => m.wait > 0 || (m.age = (m.age || 0) + dt) < 16);
       this.pegs = this.clusterPegs(0); this.lowerPegs = this.clusterPegs(1);
@@ -481,7 +494,8 @@
         if (t === this.player) {
           if (!this.autoAim) this.aim[t] = this.playerAim;
           if (this.firing && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 20 ? 10 : 14); this.cool[t] = .04; }
-          else if (this.autoFire && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 12 ? 18 : this.t < 50 ? 24 : 32); this.cool[t] = rate; }
+          else if (this.autoFire && this.cool[t] <= 0) { this.spawn(t, 0, this.t < 12 ? 18 : this.t < 50 ? 24 : 32); this.cool[t] = rate * (.7 + Math.random() * .35);
+            if (this.autoAim && Math.random() < (this.t < 40 ? .002 : this.t < 120 ? .02 : .06) * this.power[t] && this.items.some(v => v > 0)) this.use(t, this.items.findIndex(v => v > 0)); } // autopilot: same cadence + item use as AI
         } else if (this.cool[t] <= 0) {
           this.spawn(t, 0, this.t < 12 ? 18 : this.t < 50 ? 24 : 32);
           this.cool[t] = rate * (.7 + Math.random() * .35);
@@ -552,6 +566,7 @@
       /* smoothFront disabled: territory changes only by bullets (strict rule) */
 
       const active = [], trailMax = 12;
+      { const a = this.shots; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0, x = a[i]; a[i] = a[j]; a[j] = x; } } // fair processing order (team 0 used to always paint first)
       for (const p of this.shots) {
         p.trail.push([p.x, p.y]); if (p.trail.length > (p.kind === 2 ? 260 : trailMax)) p.trail.shift();
         if (p.kind === 2) {
@@ -572,7 +587,7 @@
               if (vn < 0) { p.vx -= 2 * vn * nx; p.vy -= 2 * vn * ny; }
               if (!p.hitCd) {
                 const ball = p.value, sh = this.hp[b], d = Math.min(ball, sh) * .81;   // ref: 3.0M vs 7.9M → 585K / 5.4M
-                p.value = ball - d; this.hitBase(b, d * this.lateK());
+                p.value = ball - d; this.hitBase(b, d * this.lateK(b));
                 p.hitCd = .6;
                 for (let k = 0; k < 30; k++) { const a = rand(0, 6.283), v = rand(40, 260); this.sparks.push({ x: bx + nx * 92 / WS, y: by + ny * 92 / WS, team: b, life: 1, burst: 1, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
                 this.events.push({ t: this.t, team: p.team, kind: 'ballHit', target: b, ball, sh, after: [p.value, this.ammo[b]] });
@@ -684,11 +699,12 @@
       for (let t = 0; t < 4; t++) {
         this.score[t] = Math.max(0, this.score[t] + dt * (12000 + this.share[t] * 60000));
         this.level[t] = Math.min(99, Math.floor(this.t / 30));
+        if (!this.dead[t] && this.t > 615) { const al = [0, 1, 2, 3].filter(q => !this.dead[q]), lead = al.reduce((x, q) => (this.share[q] > this.share[x] ? q : x), al[0]); if (al.length > 1 && t !== lead) this.hitBase(t, dt * (this.t - 615) * 1.5e5); } // sudden death: guarantees a survivor by ~10:50
         if (!this.dead[t]) this.ammo[t] += dt * (400 + this.share[t] * 8000) * this.power[t]; this.ammo[t] = Math.min(this.ammo[t], 3e6);
       }
       if (this.dead.filter(d => !d).length === 1) { this.winner = this.dead.indexOf(false); this.over = true; }
-      else if (this.t >= MATCH) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
-      else if (this.share.some(v => v > .985 && this.t > 600)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
+      else if (this.t >= MATCH) { const al = [0, 1, 2, 3].filter(t => !this.dead[t]); this.winner = al.reduce((a, t) => (this.share[t] > this.share[a] ? t : a), al[0]); this.over = true; }
+      else if (false && this.share.some(v => v > .985 && this.t > 600)) { this.winner = this.share.indexOf(Math.max(...this.share)); this.over = true; }
     }
   }
 
@@ -1407,7 +1423,7 @@
       resolution: 1,
       powerPreference: 'high-performance'
     });
-    view = new PixiView(app);
+    Game.expose(); view = new PixiView(app);
     window.__W4B_APP = app;
     window.__W4B_VIEW = view;
     window.__W4B_ENGINE = 'pixi-v8-webgl';
