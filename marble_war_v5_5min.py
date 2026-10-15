@@ -25,9 +25,10 @@ V.V_TITLE.sub = "完整对局 · 自然模拟 · 5 分钟"
 TOTAL_F = 300 * FPS          # 5:00
 BOSS_F = 180 * FPS           # 3:00 Boss 来袭
 DECIDE_F = 292 * FPS         # 4:52 decision if >1 alive (knockout usually decides first)
-SPAWN_GAP = 84               # frames between drops of one team (~2.8s), staggered
+SPAWN_GAP0, SPAWN_GAP1 = 150, 54   # growth: drop interval per team ramps 5s → 1.8s
 TINY_DRAIN = 0.055           # white dot lifetime ≈ 10/0.055 ≈ 180f (map-crossing, less pileup)
 TINY_DMG = 0.22
+DMG_CAP, DMG_FRAME = 60.0, 6.0   # per-hit cap / per attacker→victim per frame
 FOUNTAIN_VX = 12.0           # px/frame horizontal fountain spray (reaches outer 倍率 slots)
 _DISK = [(dx, dy) for dy in range(-2, 3) for dx in range(-2, 3) if dx * dx + dy * dy <= 4]
 
@@ -50,8 +51,6 @@ class FullGame(Demo):
         self.log = []                           # (frame, kind, data) story log
         self.share_hist = []
         self.tips = []
-        self.fire_period = 4          # slower denser-enough jets for 5min
-        self.fire_period_pow = 22
         self.tip("开局集火中央 · 随后顺时针旋转", (200, 220, 255), 90)
 
     def spawn_marble(self, t, mult=1, vx=0.0, tag="", force=None):
@@ -68,8 +67,12 @@ class FullGame(Demo):
 
     # natural drops ------------------------------------------------------
     def tick_marbles(self, ev):
+        u = min(1.0, self.f / float(TOTAL_F))
+        gap = int(SPAWN_GAP0 + (SPAWN_GAP1 - SPAWN_GAP0) * u)
+        self._next_drop = getattr(self, "_next_drop", None) or [10 + t * 37 for t in range(self.nt)]
         for t in range(self.nt):
-            if self.alive_t[t] and self.f >= 10 and (self.f - 10 - t * (SPAWN_GAP // self.nt)) % SPAWN_GAP == 0:
+            if self.alive_t[t] and self.f >= self._next_drop[t]:
+                self._next_drop[t] = self.f + gap
                 self.spawn_marble(t, max(1, int(self.mult_bonus[t])), self.rng.uniform(-0.6, 0.6),
                                   tag=f"n{self.f}_{t}", force=None)
         # drop marbles of dead teams
@@ -78,35 +81,6 @@ class FullGame(Demo):
                 self._detach_body(m); m.alive = False; m.state = "done"
         super().tick_marbles(ev)
 
-    def fire_team(self, t, ev):
-        """Same rules as demo, thinner white cloud for 5-min runtime."""
-        if not self.alive_t[t] or self.fire_cd[t] > 0:
-            return
-        # delegate big_pending / powered to parent by briefly swapping fire params
-        # For normal jets, fire fewer ourselves mirroring parent logic
-        bx, by = self.bases[t]
-        ang = self.ang[t]
-        name = self.power[t]
-        if self.big_pending[t]:
-            return super().fire_team(t, ev)
-        powered = bool(name and self.power_t[t] > 0 and name != "大球")
-        if powered:
-            return super().fire_team(t, ev)
-        self.fire_cd[t] = self.fire_period
-        speed, energy, r0, n_shot, spread = 2.4, 8.0, 28.0, 4, 0.42
-        ids = self._alloc(n_shot)
-        for k, i in enumerate(ids):
-            a = ang + (k - (n_shot - 1) / 2) * (spread / max(1, n_shot - 1))
-            a += self.rng.uniform(-0.04, 0.04)
-            sp = speed * self.rng.uniform(0.88, 1.12)
-            self.px[i] = bx + __import__("math").cos(a) * r0
-            self.py[i] = by + __import__("math").sin(a) * r0
-            self.pvx[i] = __import__("math").cos(a) * sp
-            self.pvy[i] = __import__("math").sin(a) * sp
-            self.ptm[i] = t; self.pval[i] = energy; self.pbase[i] = energy
-            self.palive[i] = True; self.pkind[i] = 0; self.ppow[i] = False; self.phit[i] = -1
-
-    # vectorized threat scan ---------------------------------------------
     def threat_target(self, t):
         """Same range-gated threat lock as demo (vectorized)."""
         if not self.alive_t[t]:
@@ -138,6 +112,17 @@ class FullGame(Demo):
         if sc[k] <= 0:
             return None
         return (float(px[k]), float(py[k]), float(dist[k]), float(power[k]))
+
+    def apply_base_damage(self, victim, amount, attacker, ev):
+        # per-frame budget per attacker→victim so stacked items can't melt a base instantly
+        if getattr(self, "_bf", -1) != self.f:
+            self._bf = self.f; self._bud = {}
+        k = (int(attacker), int(victim)); used = self._bud.get(k, 0.0)
+        amount = min(float(amount), DMG_CAP, max(0.0, DMG_FRAME - used))
+        if amount <= 0:
+            return
+        self._bud[k] = used + amount
+        return super().apply_base_damage(victim, amount, attacker, ev)
 
     def _kill_team(self, victim, killer, ev):
         was = self.alive_t[victim]
