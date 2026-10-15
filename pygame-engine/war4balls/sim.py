@@ -81,6 +81,8 @@ class Game:
 
     # ---- economy -----------------------------------------------------------
     def award(self, team, slot, value):
+        if self.dead[team]:
+            return
         from .config import MULT
         v = value * MULT[slot]
         self.ammo[team] = min(999e6, self.ammo[team] + v * .004 * (1 + self.tp / 90))
@@ -132,12 +134,17 @@ class Game:
             self.bteam[i] = team; self.bkind[i] = kind; self.bbounce[i] = 0
             self.n += 1
 
-    def use(self, team, i):
+    def use(self, team, i, force=False):
         bag = self.items[team]
-        if bag[i] <= 0 or self.dead[team] or (i == 3 and self.tp < 45):
+        if bag[i] <= 0 or self.dead[team]:
             return False
-        if i == 3 and len(self.balls) >= (2 if self.tp > 420 else 1):
-            return False
+        # Soft pacing gates for AI-chosen uses; slot-land triggers pass force=True so the
+        # right battlefield always shows the effect that the left board just awarded.
+        if i == 3 and not force:
+            if self.tp < 45:
+                return False
+            if len(self.balls) >= (2 if self.tp > 420 else 1):
+                return False
         bag[i] -= 1
         self.events.append((self.t, 'use', team, i))
         a = self.aim[team]; bx, by = BASES[team]
@@ -152,20 +159,24 @@ class Game:
                     break
                 ang = a - half + 2 * half * (k + self.U(.15, .85)) / n
                 v = self.U(speed * .9, speed * 1.12)
-                i = self.n
-                self.bx[i] = bxs + math.cos(ang) * 10; self.by[i] = bys + math.sin(ang) * 10
-                self.bvx[i] = math.cos(ang) * v; self.bvy[i] = math.sin(ang) * v
-                self.bteam[i] = team; self.bkind[i] = kind; self.bbounce[i] = 0
+                bi = self.n
+                self.bx[bi] = bxs + math.cos(ang) * 10; self.by[bi] = bys + math.sin(ang) * 10
+                self.bvx[bi] = math.cos(ang) * v; self.bvy[bi] = math.sin(ang) * v
+                self.bteam[bi] = team; self.bkind[bi] = kind; self.bbounce[bi] = 0
                 self.n += 1
             self.shotgun_fx = (team, self.t, a)
             self.events.append((self.t, 'shotgun', team))
-        elif i == 1:                                 # 机枪: rapid straight stream for 2.5 s
+        elif i == 1:                                 # 机枪: rapid straight stream (~3 s)
             self.mg[team] = 3.0
             self.events.append((self.t, 'machinegun', team))
         elif i == 2:                                 # 护盾: adds HP, "+20K" floater
             add = round(2e4 * 2 ** min(4, int(self.tp / 90)))
+            before = self.hp[team]
             self.hp[team] = min(16e6, self.hp[team] + add)
-            self.floater(bx, by - 30, '+' + fmt(add), team)
+            actual = self.hp[team] - before
+            if actual > 0:
+                self.floater(bx, by - 30, '+' + fmt(actual), team)
+            self.events.append((self.t, 'shield', team, actual))
         elif i == 3:                                 # 大球
             v = 2 ** min(23, 17 + int(self.U(0, 2.5) + self.tp / 90))
             self.balls.append(BigBall(team, bx + math.cos(a) * 30, by + math.sin(a) * 30, a, v))
@@ -230,7 +241,11 @@ class Game:
                     self.cool[t] = rate * self.U(.7, 1.05)
                     p = (.002 if self.tp < 40 else .02 if self.tp < 120 else .06) * self.power[t]
                     if rng.random() < p and any(v > 0 for v in self.items[t]):
-                        self.use(t, next(i for i, v in enumerate(self.items[t]) if v > 0))
+                        # Try every held item until one actually fires (was: always first index,
+                        # so a blocked 大球 silently swallowed 机枪/狙击 forever).
+                        for ii, vv in enumerate(self.items[t]):
+                            if vv > 0 and self.use(t, ii):
+                                break
         # opening: four sniper rounds paint lines to the centre and burst
         if not self.opened:
             if self.opening is None and self.t > .5:
@@ -353,7 +368,16 @@ class Game:
             for b in range(4):
                 if b != sn['team'] and not self.dead[b] and b not in sn['hit']:
                     bx2, by2 = BASES[b]
-                    if math.hypot(xe - bx2, ye - by2) < BASE_R:
+                    # Distance from base centre to this frame's flight segment (not just the head sample),
+                    # so a beam that crosses a shield still chips it.
+                    dx, dy = xe - x0, ye - y0
+                    L2 = dx * dx + dy * dy
+                    if L2 < 1e-9:
+                        dist = math.hypot(x0 - bx2, y0 - by2)
+                    else:
+                        tseg = clamp(((bx2 - x0) * dx + (by2 - y0) * dy) / L2, 0.0, 1.0)
+                        dist = math.hypot(x0 + dx * tseg - bx2, y0 + dy * tseg - by2)
+                    if dist < BASE_R:
                         sn['hit'].add(b); self.hit_base(b, 3e5 * self.late_k(b)); self.burst_sparks(xe, ye, b, 40, 300, 1.0)
             if out:
                 sn['done'] = True; sn['x'], sn['y'] = xe, ye

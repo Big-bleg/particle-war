@@ -6,7 +6,7 @@ and is consumed or teleported at once (fix: marbles bouncing back out without tr
 import math
 import pymunk
 from .config import (LEFT, H, GRAV, PEG_R, GAP, BUOY_Y0, CUP_FLOOR, LPILLARS, SLOT_X, SLOT_TOP, MULT,
-                     CLUSTERS, CLUSTER_R, ITEM_X, IPILLARS, ITEM_TOP, ITEM_FLOOR, ITEM_MIX, GATE_VALUE,
+                     CLUSTERS, CLUSTER_R, ITEM_X, IPILLARS, ITEM_TOP, ITEM_FLOOR, GATE_VALUE,
                      marble_radius, clamp)
 
 MARBLE, CUP, GATE, ITEM, WALL = 1, 2, 3, 4, 5
@@ -184,9 +184,15 @@ class Board:
     def tick(self, dt):
         sim, rng = self.sim, self.rng
         r0 = int(sim.frame) % 4                     # rotating start team: no team gets first pick of a free slot
+        # Drop marbles whose team is already eliminated (prevents left-slot flash with no right effect).
+        for m in list(self.marbles):
+            if sim.dead[m.team]:
+                self._consume(m)
         for tt in range(4):
             t = (r0 + tt) % 4
             self.next_marble[t] -= dt
+            if sim.dead[t]:
+                continue
             if self.next_marble[t] <= 0 and sum(1 for q in self.marbles if q.team == t) < 2 and len(self.marbles) < min(8, round(6 / sim.k)):   # per-team + total cap
                 k = min(12, int(rng.uniform(0, 3) + min(7, sim.tp / 60) * rng.uniform(.4, .9)))
                 self.add_marble(t, 2 ** k)
@@ -214,18 +220,21 @@ class Board:
             if kind == 'cup':
                 self._land_cup(m, slot)
             elif kind == 'item':
-                it = 0
-                w = rng.uniform(0, sum(ITEM_MIX))
-                for c in ITEM_MIX:
-                    w -= c
-                    if w < 0:
-                        break
-                    it += 1
-                it = min(4, it)
+                # Physical slot k maps 1:1 to ITEM_NAMES[k]. Do NOT remap via ITEM_MIX
+                # (that made the left label disagree with the granted item).
+                it = int(slot)
+                assert 0 <= it <= 4, it
                 x, y = m.body.position
-                self.fx.append(('item', x, y, m.team, it, sim.t))
-                sim.give_item(m.team, it)
-                self.item_flash[it] = (m.team, sim.t)
+                fired = False
+                if not sim.dead[m.team]:
+                    sim.give_item(m.team, it)
+                    # Slot is an item trigger: fire the matching right-side effect for this marble's team now.
+                    fired = bool(sim.use(m.team, it, force=True))
+                # Only flash / "+1" when the right-side effect actually fired (no fake UI for dead teams).
+                if fired:
+                    self.fx.append(('item', x, y, m.team, it, sim.t))
+                    self.item_flash[it] = (m.team, sim.t)
+                sim.events.append((sim.t, 'item_land', m.team, it, fired))
                 self._consume(m)
         # stuck detection + nudge, trails, zone bookkeeping
         for m in list(self.marbles):
@@ -264,6 +273,10 @@ class Board:
 
     def _land_cup(self, m, slot):
         sim = self.sim
+        if m not in self.marbles or m.queued or sim.dead[m.team]:
+            if m in self.marbles and not m.queued and sim.dead[m.team]:
+                self._consume(m)
+            return
         self.hit[slot] += 1
         self.slot_flash[slot] = 1.0
         sim.award(m.team, slot, m.v)
