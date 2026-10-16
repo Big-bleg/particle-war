@@ -139,6 +139,8 @@ class Renderer:
     def render(self, game, target: moderngl.Framebuffer, viewport=None):
         ctx = self.ctx
         self.time = game.t
+        # Procedural sparkle placement must match when rendering a frame directly or from video.
+        self.rng = np.random.default_rng((int(game.seed) * 1000003 + int(game.frame)) & 0xFFFFFFFF)
         T = []                                  # text items
         base_a, world_a, world_add, hud_a, hud_add, glow = Batch(), Batch(), Batch(), Batch(), Batch(), Batch()
         self._left(game, base_a, hud_add, T, glow)

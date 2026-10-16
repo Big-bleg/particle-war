@@ -118,7 +118,7 @@ def run_realtime(a):
                 elif e.key == pygame.K_F11:
                     full = not full
                     set_mode((0, 0) if full else (ww, wh), flags | (pygame.FULLSCREEN if full else 0))
-                elif pygame.K_1 <= e.key <= pygame.K_5: game.use(game.player, e.key - pygame.K_1)
+                elif pygame.K_1 <= e.key <= pygame.K_5: game.manual_item(game.player, e.key - pygame.K_1)
         dt = clock.tick(144) / 1000.0
         if not paused:
             acc = min(acc + dt * speed, .25)

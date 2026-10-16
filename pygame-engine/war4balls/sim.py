@@ -1,11 +1,12 @@
 """Game rules (ported from web-game/js/game.js) - deterministic given a seed."""
 import math
 import numpy as np
-from .config import (G, GS, S, WS, NEUTRAL, BASES, BASE_R, MATCH, TAU, fmt, clamp)
+from .config import (G, GS, S, WS, NEUTRAL, BASES, BASE_R, MATCH, MG_DURATION, SNIPER_SPEED, TAU, fmt, clamp)
 from . import kernels as K
 from .board import Board
 
 MAXB = 9000
+PATH_CELLS = 64
 
 
 class BigBall:
@@ -44,6 +45,7 @@ class Game:
         self.cool = [0.0] * 4
         self.emit_acc = [0.0] * 4
         self.mg = [0.0] * 4
+        self.mg_emit_acc = [0.0] * 4
         self.items = [[0] * 5 for _ in range(4)]
         self.item_total = [0] * 5
         self.opened = False; self.opening = None; self.burst = None
@@ -55,7 +57,13 @@ class Game:
         self.bx = np.zeros(MAXB); self.by = np.zeros(MAXB); self.bvx = np.zeros(MAXB); self.bvy = np.zeros(MAXB)
         self.bteam = np.zeros(MAXB, np.int8); self.bkind = np.zeros(MAXB, np.int8); self.bbounce = np.zeros(MAXB, np.int8)
         self._alive = np.zeros(MAXB, np.int8)
-        self._occ_t = np.zeros(GS * GS, np.int8); self._occ_i = np.zeros(GS * GS, np.int32); self._occ_s = np.zeros(GS * GS, np.int32)
+        self._bullet_owner = np.zeros(GS * GS, np.uint8)
+        self._path_cells = np.zeros((MAXB, PATH_CELLS), np.int32); self._path_len = np.zeros(MAXB, np.int32); self._path_stop = np.zeros(MAXB, np.int8)
+        self._occ_head = np.empty(GS * GS, np.int32)
+        self._occ_next = np.empty(MAXB * PATH_CELLS, np.int32); self._occ_bullet = np.empty(MAXB * PATH_CELLS, np.int32)
+        self._collided = np.zeros(MAXB, np.int8)
+        self._start_x = np.zeros(MAXB); self._start_y = np.zeros(MAXB)
+        self._turn_x = np.zeros((MAXB, 2)); self._turn_y = np.zeros((MAXB, 2)); self._turn_n = np.zeros(MAXB, np.int8)
         self._dead = np.zeros(4, np.int8); self._dmg = np.zeros(4); self._paints = np.zeros(4, np.int64); self._cnt = np.zeros(4, np.int64)
         self.board = Board(self)
 
@@ -89,7 +97,6 @@ class Game:
 
     def give_item(self, team, it):
         self.items[team][it] = min(99, self.items[team][it] + 1)
-        self.item_total[it] += 1
 
     def late_k(self, b):
         """Staggered eliminations: weakest alive base ramps after ~7:10/8:40/10:10; all non-leaders after 10:15."""
@@ -116,6 +123,17 @@ class Game:
             self.burst_sparks(bx, by, b, 160, 520, 2.0)
             self.events.append((self.t, 'eliminated', b))
 
+    def resolve_result(self):
+        """Set the result from living shields, then apply the documented timeout tiebreak."""
+        al = self.alive_teams()
+        if not al:
+            self.winner = -1; self.over = True
+        elif len(al) == 1:
+            self.winner = al[0]; self.over = True
+        elif self.tp >= MATCH:
+            self.winner = max(al, key=lambda t: (self.share[t], self.hp[t], -t)); self.over = True
+        return self.over
+
     # ---- weapons -----------------------------------------------------------
     def emit(self, team, count, kind, speed, half_spread, jitter_t=0.0, ang=None):
         """Add `count` bullets; each gets a random sub-tick age so a stream is continuous (no puffs)."""
@@ -134,9 +152,69 @@ class Game:
             self.bteam[i] = team; self.bkind[i] = kind; self.bbounce[i] = 0
             self.n += 1
 
+    def _fire_item(self, team, i, strength=None):
+        """Apply an item without touching the team's stored inventory."""
+        if self.dead[team] or not 0 <= i < 5:
+            return False
+        a = self.aim[team]; bx, by = BASES[team]
+        if i == 0:                                   # 散弹: 90 normal bullets in a 25° barrel-centred cone
+            n_before = self.n
+            age = self.tp / MATCH
+            kind, speed = (0, 4.2) if age < .12 else (1, 5.0) if age < .75 else (4, 4.6)
+            half = math.radians(12.5)
+            bxs, bys = BASES[team]
+            for k in range(90):
+                if self.n >= MAXB:
+                    break
+                ang = a - half + 2 * half * (k + self.U(.15, .85)) / 90
+                v = self.U(speed * .9, speed * 1.12)
+                bi = self.n
+                self.bx[bi] = bxs + math.cos(ang) * 10; self.by[bi] = bys + math.sin(ang) * 10
+                self.bvx[bi] = math.cos(ang) * v; self.bvy[bi] = math.sin(ang) * v
+                self.bteam[bi] = team; self.bkind[bi] = kind; self.bbounce[bi] = 0
+                self.n += 1
+            self.shotgun_fx = (team, self.t, a)
+            self.events.append((self.t, 'shotgun', team, self.n - n_before))
+        elif i == 1:                                 # 机枪: rapid straight stream (3 reference seconds)
+            self.mg[team] = MG_DURATION * self.k
+            self.events.append((self.t, 'machinegun', team))
+        elif i == 2:                                 # 护盾: capped HP gain
+            add = round(2e4 * 2 ** min(4, int(self.tp / 90)))
+            before = self.hp[team]
+            self.hp[team] = min(16e6, self.hp[team] + add)
+            actual = self.hp[team] - before
+            if actual <= 0:
+                return False
+            self.floater(bx, by - 30, '+' + fmt(actual), team)
+            self.events.append((self.t, 'shield', team, actual))
+        elif i == 3:                                 # 大球: a slot land passes its marble value through
+            v = float(2 ** 17 if strength is None else max(1.0, strength))
+            self.balls.append(BigBall(team, bx + math.cos(a) * 30, by + math.sin(a) * 30, a, v))
+            self.ammo[team] += 2e5
+            self.events.append((self.t, 'bigball', team, v))
+        elif i == 4:                                 # 狙击: moving piercing round, paints through to the edge
+            self.snipers.append(dict(team=team, x=bx + math.cos(a) * 40, y=by + math.sin(a) * 40, vx=math.cos(a) * SNIPER_SPEED, vy=math.sin(a) * SNIPER_SPEED,
+                                     x0=bx, y0=by, hit=set(), done=False, fade=0.0))
+            self.events.append((self.t, 'sniper', team))
+        else:
+            return False
+        self.item_total[i] += 1
+        self.events.append((self.t, 'use', team, i))
+        return True
+
+    def fire_item(self, team, i, strength=None):
+        """Fire an item directly; used by item-slot landings so no inventory is added or spent."""
+        return self._fire_item(team, i, strength)
+
+    def manual_item(self, team, i):
+        """Keyboard activation: cast the selected item directly without requiring a banked charge."""
+        if i == 3 and (self.tp < 45 or len(self.balls) >= (2 if self.tp > 420 else 1)):
+            return False
+        return self.fire_item(team, i)
+
     def use(self, team, i, force=False):
         bag = self.items[team]
-        if bag[i] <= 0 or self.dead[team]:
+        if not 0 <= i < len(bag) or bag[i] <= 0 or self.dead[team]:
             return False
         # Soft pacing gates for AI-chosen uses; slot-land triggers pass force=True so the
         # right battlefield always shows the effect that the left board just awarded.
@@ -145,54 +223,19 @@ class Game:
                 return False
             if len(self.balls) >= (2 if self.tp > 420 else 1):
                 return False
+        if not self._fire_item(team, i):
+            return False
         bag[i] -= 1
-        self.events.append((self.t, 'use', team, i))
-        a = self.aim[team]; bx, by = BASES[team]
-        if i == 0:                                   # 散弹: 90 normal bullets fanned over ±12.5° around the barrel
-            # 25° cone, symmetric ±12.5° around the barrel: big burst of NORMAL bullets (same kind/speed/rules as the stream)
-            age = self.tp / MATCH
-            kind, speed = (0, 4.2) if age < .12 else (1, 5.0) if age < .75 else (4, 4.6)
-            n, half = 90, math.radians(12.5)
-            bxs, bys = BASES[team]
-            for k in range(n):
-                if self.n >= MAXB:
-                    break
-                ang = a - half + 2 * half * (k + self.U(.15, .85)) / n
-                v = self.U(speed * .9, speed * 1.12)
-                bi = self.n
-                self.bx[bi] = bxs + math.cos(ang) * 10; self.by[bi] = bys + math.sin(ang) * 10
-                self.bvx[bi] = math.cos(ang) * v; self.bvy[bi] = math.sin(ang) * v
-                self.bteam[bi] = team; self.bkind[bi] = kind; self.bbounce[bi] = 0
-                self.n += 1
-            self.shotgun_fx = (team, self.t, a)
-            self.events.append((self.t, 'shotgun', team))
-        elif i == 1:                                 # 机枪: rapid straight stream (~3 s)
-            self.mg[team] = 3.0
-            self.events.append((self.t, 'machinegun', team))
-        elif i == 2:                                 # 护盾: adds HP, "+20K" floater
-            add = round(2e4 * 2 ** min(4, int(self.tp / 90)))
-            before = self.hp[team]
-            self.hp[team] = min(16e6, self.hp[team] + add)
-            actual = self.hp[team] - before
-            if actual > 0:
-                self.floater(bx, by - 30, '+' + fmt(actual), team)
-            self.events.append((self.t, 'shield', team, actual))
-        elif i == 3:                                 # 大球
-            v = 2 ** min(23, 17 + int(self.U(0, 2.5) + self.tp / 90))
-            self.balls.append(BigBall(team, bx + math.cos(a) * 30, by + math.sin(a) * 30, a, v))
-            self.ammo[team] += 2e5
-            self.events.append((self.t, 'bigball', team))
-        elif i == 4:                                 # 狙击: instant beam painting a solid line to the edge
-            # a single big, fast piercing round: flies ~2400 px/s, paints a solid line behind it, chips every enemy shield it crosses
-            self.snipers.append(dict(team=team, x=bx + math.cos(a) * 40, y=by + math.sin(a) * 40, vx=math.cos(a) * 1500, vy=math.sin(a) * 1500,
-                                     x0=bx, y0=by, hit=set(), done=False, fade=0.0))
-            self.events.append((self.t, 'sniper', team))
         return True
 
     # ---- main tick ---------------------------------------------------------
     def tick(self, dt):
-        # after the result the match keeps animating (winner keeps painting, marbles keep falling); the result is frozen
+        # Freeze simulation after resolution so screenshots and video exports agree after game over.
+        if self.over:
+            return
         self.t += dt; self.frame += 1
+        if self.resolve_result():
+            return
         rng = self.rng
         # turret aim: centre during opening; then sweep + snap-lock onto enemy big balls
         for t in range(4):
@@ -226,7 +269,7 @@ class Game:
                 band = (.3 if self.share[t] > .29 else .65 if self.share[t] > .24 else 1.4 if self.share[t] < .18 else 1.0) if self.tp < 420 else 1.0
                 rate = clamp(.11 - self.tp * .0001, .04, .11) / (self.power[t] * band)
                 nvol = 18 if self.tp < 12 else 24 if self.tp < 50 else 32
-                bps = nvol / (rate * .875)
+                bps = nvol / (rate * .875 * self.k)
                 if self.ammo[t] >= 800:
                     self.emit_acc[t] += bps * dt
                     n = int(self.emit_acc[t]); self.emit_acc[t] -= n
@@ -235,10 +278,13 @@ class Game:
                         self.emit(t, n, kind, speed, .063, dt)
                 if self.mg[t] > 0:
                     self.mg[t] -= dt
-                    self.emit(t, 9, 7, 7.5, .014, dt)          # machine gun: dense, fast, tight (kind 7, normal paint rules)
+                    self.mg_emit_acc[t] += 9 * 60 * dt / self.k
+                    mg_n = int(self.mg_emit_acc[t]); self.mg_emit_acc[t] -= mg_n
+                    if mg_n:
+                        self.emit(t, mg_n, 7, 7.5, .014, dt)    # machine gun: dense, fast, tight (kind 7, normal paint rules)
                 self.cool[t] -= dt
                 if self.cool[t] <= 0:
-                    self.cool[t] = rate * self.U(.7, 1.05)
+                    self.cool[t] = rate * self.k * self.U(.7, 1.05)
                     p = (.002 if self.tp < 40 else .02 if self.tp < 120 else .06) * self.power[t]
                     if rng.random() < p and any(v > 0 for v in self.items[t]):
                         # Try every held item until one actually fires (was: always first index,
@@ -248,7 +294,7 @@ class Game:
                                 break
         # opening: four sniper rounds paint lines to the centre and burst
         if not self.opened:
-            if self.opening is None and self.t > .5:
+            if self.opening is None and self.t > .5 * self.k:
                 self.opening = []
                 for t, (bx, by) in enumerate(BASES):
                     a = math.atan2(G / 2 - by, G / 2 - bx)
@@ -276,7 +322,7 @@ class Game:
         self.board.tick(dt)
         # power drift / late leader boosts
         self.power_clock += dt
-        if self.power_clock > 6:
+        if self.power_clock > 6 * self.k:
             self.power_clock = 0
             lo, hi = (.75, 1.3) if self.tp < 90 else (.35, 1.9)
             for t in range(4):
@@ -288,16 +334,16 @@ class Game:
         if self.frame % 15 == 0:
             K.decay_heat(self.heat, .8 if self.t > 20 else .96)
         # late flood waves + extra big balls
-        if self.tp > 440:
+        if self.tp > 440 and self.alive_teams():
             al = self.alive_teams()
             lead = max(al, key=lambda t: self.share[t])
             if not any(w['team'] == lead for w in self.waves) and self.tp - self.last_storm.get(lead, -99) > 9:
                 self.last_storm[lead] = self.tp
                 bx, by = BASES[lead]
                 self.waves.append(dict(team=lead, r=90.0, a=math.atan2(G / 2 - by, G / 2 - bx) + self.U(-.25, .25), half=.9, sp=170.0, life=0.0))
-            if rng.random() < dt * .08 and len(self.balls) < 2:
+            if rng.random() < dt * .08 / self.k and len(self.balls) < 2:
                 t = al[int(rng.integers(0, len(al)))]
-                self.items[t][3] += 1; self.use(t, 3)
+                self.fire_item(t, 3, strength=2 ** 17)
         for w in self.waves:
             w['r'] += w['sp'] * dt; w['life'] += dt
             bx, by = BASES[w['team']]
@@ -337,7 +383,7 @@ class Game:
             p.trail.append((p.x, p.y))
             if len(p.trail) > 260:
                 p.trail.pop(0)
-            if p.value < 5e4 or p.age > 22:
+            if p.value < 5e4 or p.age > 22 * self.k:
                 p.alive = False
                 continue
             K.paint_solid(self.grid, self.heat, p.x, p.y, p.team, rr * .95)
@@ -350,8 +396,9 @@ class Game:
                 self._dead[t] = 1 if self.dead[t] else 0
             self._dmg[:] = 0
             self.n = K.step_bullets(self.n, self.bx, self.by, self.bvx, self.bvy, self.bteam, self.bkind, self.bbounce, order,
-                                    self.grid, self.heat, self._dead, self._dmg, self._paints, self._occ_t, self._occ_i, self._occ_s,
-                                    self.frame, dt, self._alive)
+                                    self.grid, self.heat, self._dead, self._dmg, self._paints, self._bullet_owner, self._path_cells, self._path_len, self._path_stop,
+                                    self._occ_head, self._occ_next, self._occ_bullet, self._collided,
+                                    self._start_x, self._start_y, self._turn_x, self._turn_y, self._turn_n, dt, self._alive)
             for b in range(4):
                 if self._dmg[b] > 0:
                     self.hit_base(b, self._dmg[b] * 1500 * self.late_k(b))
@@ -407,10 +454,4 @@ class Game:
                     self.hit_base(t, dt / self.k * (self.tp - 615) * 1.5e5)        # sudden death -> survivor by ~10:50
             if not self.dead[t]:
                 self.ammo[t] = min(3e6, self.ammo[t] + dt / self.k * (400 + self.share[t] * 8000) * self.power[t])
-        al = self.alive_teams()
-        if self.over:
-            return
-        if len(al) == 1:
-            self.winner = al[0]; self.over = True
-        elif self.tp >= MATCH:
-            self.winner = max(al, key=lambda t: self.share[t]); self.over = True
+        self.resolve_result()

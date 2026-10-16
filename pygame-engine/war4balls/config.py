@@ -39,8 +39,10 @@ ITEM_X = [0, 138, 290, 448, 601, 760]
 IPILLARS = [(0, 12), (137, 23), (290, 23), (448, 23), (601, 23), (748, 12)]          # item-slot dividers x, w
 ITEM_TOP, ITEM_FLOOR = 990.0, 1052.0
 ITEM_NAMES = ['散弹', '机枪', '护盾', '大球', '狙击']
-ITEM_MIX = [5, 17, 11, 14, 6]   # ref2 item counts at 6:25
+ITEM_MIX = [5, 17, 11, 14, 6]   # ref2 observed counts at 6:25; informational, not enforced by the engine
 GATE_VALUE = 262144             # 2^18: marbles >= this pass the buffer strip
+MG_DURATION = 3.0                # reference seconds; Game scales this by its match preset
+SNIPER_SPEED = 1500.0            # px/s; sniper is a moving projectile, not an instant beam
 
 def marble_radius(v):
     return .85 * (25 if v >= 1e6 else 20 if v >= 1e5 else 18 if v >= 5e4 else 16.5 if v >= 2e4 else 15 if v >= 1e4 else 13 if v >= 1e3 else 10 if v >= 100 else 8.5)

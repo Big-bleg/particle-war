@@ -20,9 +20,10 @@ def _assert_use_side_effects(g, team, it, before):
     """Prove the right battlefield changed for this item id."""
     name = ITEM_NAMES[it]
     if it == 0:
-        # Turrets also emit in the same ticks; require a large burst from THIS team.
+        # A slot can be fired during Game.tick, where the kernel immediately consumes the bullets.
+        bursts = [e[3] for e in g.events if e[1] == 'shotgun' and e[2] == team and len(e) > 3]
         team_new = sum(1 for i in range(before['n'], g.n) if int(g.bteam[i]) == team)
-        assert team_new >= 50, ('shotgun burst too small', name, team, team_new, before['n'], g.n)
+        assert team_new >= 50 or any(n >= 50 for n in bursts), ('shotgun burst too small', name, team, team_new, bursts, before['n'], g.n)
     elif it == 1:
         assert g.mg[team] > 0, f'{name}: machine-gun timer not set'
     elif it == 2:
@@ -50,6 +51,7 @@ def check_direct_force_use(seed=1):
         g.items[team] = [0] * 5
         before = dict(n=g.n, mg=g.mg[team], hp=g.hp[team], balls=len(g.balls))
         g.give_item(team, it)
+        bag_before = g.items[team][it]
         ok = g.use(team, it, force=True)
         if not ok:
             fails.append(('direct_use_false', name, team))
@@ -58,6 +60,8 @@ def check_direct_force_use(seed=1):
             _assert_use_side_effects(g, team, it, before)
         except AssertionError as e:
             fails.append(('direct_effect', str(e)))
+        if g.items[team][it] != bag_before - 1:
+            fails.append(('stored_charge_not_spent_once', name, bag_before, g.items[team][it]))
         # label mapping: item index matches ITEM_NAMES
         assert ITEM_NAMES[it] == name
     return fails
@@ -76,9 +80,12 @@ def check_injected_slot_lands(seed=7):
             g.board._consume(m)
         g.board.queue_launch.clear()
         g.items[team] = [0] * 5
+        if slot == 0:
+            g.items[team][slot] = 99  # overflow case: the landing must fire directly, not spend an old charge
+        g.cool = [1000.0] * 4
         g.board.item_flash = [None] * 5
         g.board.fx.clear()
-        before = dict(n=g.n, mg=g.mg[team], hp=g.hp[team], balls=len(g.balls), snipers=len(g.snipers))
+        before = dict(n=g.n, mg=g.mg[team], hp=g.hp[team], balls=len(g.balls), snipers=len(g.snipers), total=g.item_total[slot], bag=g.items[team][slot])
         m = g.board.add_marble(team, 2 ** 20)  # large; skip cups via direct place
         # park inside slot sensor (not queued)
         if m in g.board.queue_launch:
@@ -114,23 +121,43 @@ def check_injected_slot_lands(seed=7):
         if not fired:
             fails.append(('not_fired', slot, ITEM_NAMES[slot], team))
             continue
+        if g.items[team][slot] != before['bag']:
+            fails.append(('slot_land_changed_inventory', slot, before['bag'], g.items[team][slot]))
+        if g.item_total[slot] != before['total'] + 1:
+            fails.append(('slot_land_use_count', slot, before['total'], g.item_total[slot]))
         # UI flash only on success, and only for this slot/item
         fl = g.board.item_flash[slot]
         if not fl or fl[0] != team:
             fails.append(('bad_flash', slot, g.board.item_flash))
         # matching events
         uses = [u for u in g.events if u[1] == 'use' and u[0] == t and u[2] == team and u[3] == it]
-        if not uses:
-            fails.append(('no_use_event', slot, ITEM_NAMES[slot]))
+        if len(uses) != 1:
+            fails.append(('use_event_count', slot, ITEM_NAMES[slot], len(uses)))
         want = EFFECT_EVENT[it]
         fx = [u for u in g.events if u[1] == want and u[0] == t and u[2] == team]
-        if not fx:
-            fails.append(('no_effect_event', slot, ITEM_NAMES[slot], want))
+        if len(fx) != 1:
+            fails.append(('effect_event_count', slot, ITEM_NAMES[slot], want, len(fx)))
         try:
             _assert_use_side_effects(g, team, it, before)
         except AssertionError as e:
             fails.append(('injected_effect', str(e)))
     return fails
+
+
+def check_shield_cap(seed=17):
+    """A capped shield leaves a stored charge untouched and produces no success effects."""
+    g = Game(seed=seed, match=300)
+    team = 2
+    g.hp[team] = 16e6
+    g.items[team][2] = 1
+    total = g.item_total[2]
+    if g.use(team, 2, force=True):
+        return [('capped_shield_reported_success',)]
+    if g.items[team][2] != 1:
+        return [('capped_shield_spent_charge', g.items[team][2])]
+    if g.item_total[2] != total or g.floaters or any(e[1] in ('use', 'shield') for e in g.events):
+        return [('capped_shield_fake_success', g.item_total[2], g.events, g.floaters)]
+    return []
 
 
 def check_natural_pipeline(seed, seconds=180, match=300):
@@ -194,6 +221,10 @@ def run(seeds=None, seconds=180):
     inj = check_injected_slot_lands()
     print('injected fails', inj)
     all_fails.extend(inj)
+    print('== shield cap ==')
+    cap = check_shield_cap()
+    print('shield-cap fails', cap)
+    all_fails.extend(cap)
     print('== natural pipeline ==')
     for seed in seeds:
         r = check_natural_pipeline(seed, seconds=seconds)

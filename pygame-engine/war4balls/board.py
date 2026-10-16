@@ -101,10 +101,10 @@ class Board:
         self.slot_flash = [0.0] * 8
         self.item_flash = [None] * 5
         self.gate_pass = 0
-        self.next_marble = [.15, .35, .55, .8]
+        self.next_marble = [v * sim.k for v in (.15, .35, .55, .8)]
         self.fx = []                     # visual events for the renderer (consumed marbles, cup hits)
         self.queue_launch = []           # marbles waiting inside the top emitter (not in the physics space)
-        self.emit_clock = .5             # first launch at 0.5 s (ref2)
+        self.emit_clock = .5 * sim.k     # first launch at 0.5 reference seconds
         self.side = 1
         order = [0, 1, 2, 3] * 4
         for i in range(16):              # opening: a stream of small mixed-colour marbles (values 1-8)
@@ -202,7 +202,7 @@ class Board:
         self.emit_clock -= dt
         if self.queue_launch and self.emit_clock <= 0:
             self._launch(self.queue_launch.pop(0))
-            self.emit_clock = .14 if sim.t < 4 else .22
+            self.emit_clock = (.14 if sim.tp < 4 else .22) * sim.k
         self.queue.clear()
         sub = 4
         for _ in range(sub):
@@ -227,9 +227,9 @@ class Board:
                 x, y = m.body.position
                 fired = False
                 if not sim.dead[m.team]:
-                    sim.give_item(m.team, it)
-                    # Slot is an item trigger: fire the matching right-side effect for this marble's team now.
-                    fired = bool(sim.use(m.team, it, force=True))
+                    # Slot landings are direct triggers, independent of the stored inventory.
+                    strength = m.v if it == 3 else None
+                    fired = bool(sim.fire_item(m.team, it, strength=strength))
                 # Only flash / "+1" when the right-side effect actually fired (no fake UI for dead teams).
                 if fired:
                     self.fx.append(('item', x, y, m.team, it, sim.t))
