@@ -10,13 +10,14 @@ PATH_CELLS = 64
 
 
 class BigBall:
-    __slots__ = ('team', 'x', 'y', 'vx', 'vy', 'value', 'v0', 'age', 'hit_cd', 'trail', 'alive')
+    __slots__ = ('team', 'x', 'y', 'vx', 'vy', 'value', 'v0', 'age', 'hit_cd', 'trail', 'alive', 'lock_grace')
 
     def __init__(self, team, x, y, a, value):
         self.team, self.x, self.y = team, x, y
-        self.vx, self.vy = math.cos(a) * 1.8, math.sin(a) * 1.8
+        self.vx, self.vy = math.cos(a) * 1.2, math.sin(a) * 1.2
         self.value = self.v0 = value
         self.age = 0.0; self.hit_cd = 0.0; self.trail = []; self.alive = True
+        self.lock_grace = 5.0
 
     @property
     def rr(self):
@@ -41,6 +42,7 @@ class Game:
         self.power_clock = 0.0
         self.spin = [float((-1 if self.rng.random() < .5 else 1) * self.rng.uniform(.45, .7)) for _ in range(4)]
         self.aim = [math.atan2(G / 2 - by, G / 2 - bx) for bx, by in BASES]
+        self.aim_hold = [0.0] * 4
         self.lock = [None] * 4
         self.cool = [0.0] * 4
         self.emit_acc = [0.0] * 4
@@ -50,6 +52,7 @@ class Game:
         self.item_total = [0] * 5
         self.opened = False; self.opening = None; self.burst = None
         self.lasers = []; self.snipers = []; self.sparks = []; self.floaters = []; self.events = []; self.waves = []
+        self.shotgun_fx = []; self.shield_fx = []
         self.last_storm = {}
         self.balls = []
         # bullet SoA
@@ -152,43 +155,58 @@ class Game:
             self.bteam[i] = team; self.bkind[i] = kind; self.bbounce[i] = 0
             self.n += 1
 
+    def _item_aim(self, team):
+        """Aim an offensive cast at the nearest living enemy base."""
+        bx, by = BASES[team]
+        enemies = [q for q in range(4) if q != team and not self.dead[q]]
+        if not enemies:
+            enemies = [q for q in range(4) if q != team]
+        target = min(enemies, key=lambda q: math.hypot(BASES[q][0] - bx, BASES[q][1] - by))
+        ex, ey = BASES[target]
+        return math.atan2(ey - by, ex - bx)
+
     def _fire_item(self, team, i, strength=None):
         """Apply an item without touching the team's stored inventory."""
         if self.dead[team] or not 0 <= i < 5:
             return False
+        if i in (0, 1, 3, 4):
+            self.aim[team] = self._item_aim(team)
+            hold = MG_DURATION * self.k if i == 1 else .8
+            self.aim_hold[team] = max(self.aim_hold[team], hold)
         a = self.aim[team]; bx, by = BASES[team]
-        if i == 0:                                   # 散弹: 90 normal bullets in a 25° barrel-centred cone
+        if i == 0:                                   # 散弹: dense normal bullets in a barrel-centred 25° cone
             n_before = self.n
             age = self.tp / MATCH
             kind, speed = (0, 4.2) if age < .12 else (1, 5.0) if age < .75 else (4, 4.6)
             half = math.radians(12.5)
             bxs, bys = BASES[team]
-            for k in range(90):
+            for k in range(240):
                 if self.n >= MAXB:
                     break
-                ang = a - half + 2 * half * (k + self.U(.15, .85)) / 90
+                ang = a - half + 2 * half * (k + self.U(.15, .85)) / 240
                 v = self.U(speed * .9, speed * 1.12)
                 bi = self.n
                 self.bx[bi] = bxs + math.cos(ang) * 10; self.by[bi] = bys + math.sin(ang) * 10
                 self.bvx[bi] = math.cos(ang) * v; self.bvy[bi] = math.sin(ang) * v
-                self.bteam[bi] = team; self.bkind[bi] = kind; self.bbounce[bi] = 0
+                self.bteam[bi] = team; self.bkind[bi] = 8; self.bbounce[bi] = 0
                 self.n += 1
-            self.shotgun_fx = (team, self.t, a)
+            self.shotgun_fx.append(dict(team=team, t=self.t, angle=a))
             self.events.append((self.t, 'shotgun', team, self.n - n_before))
         elif i == 1:                                 # 机枪: rapid straight stream (3 reference seconds)
             self.mg[team] = MG_DURATION * self.k
             self.events.append((self.t, 'machinegun', team))
         elif i == 2:                                 # 护盾: capped HP gain
-            add = round(2e4 * 2 ** min(4, int(self.tp / 90)))
             before = self.hp[team]
+            add = round(max(2.5e5, before * .03))
             self.hp[team] = min(16e6, self.hp[team] + add)
             actual = self.hp[team] - before
             if actual <= 0:
                 return False
             self.floater(bx, by - 30, '+' + fmt(actual), team)
+            self.shield_fx.append(dict(team=team, t=self.t, amount=actual))
             self.events.append((self.t, 'shield', team, actual))
         elif i == 3:                                 # 大球: a slot land passes its marble value through
-            v = float(2 ** 17 if strength is None else max(1.0, strength))
+            v = float(max(3.0e6, 2.0 * (2 ** 17 if strength is None else max(1.0, strength))))
             self.balls.append(BigBall(team, bx + math.cos(a) * 30, by + math.sin(a) * 30, a, v))
             self.ammo[team] += 2e5
             self.events.append((self.t, 'bigball', team, v))
@@ -240,6 +258,9 @@ class Game:
         # turret aim: centre during opening; then sweep + snap-lock onto enemy big balls
         for t in range(4):
             bx, by = BASES[t]
+            if self.aim_hold[t] > 0:
+                self.aim_hold[t] = max(0.0, self.aim_hold[t] - dt)
+                continue
             if not self.opened:
                 self.aim[t] = math.atan2(G / 2 - by, G / 2 - bx); continue
             if (self.frame + t) % 3 == 0:
@@ -278,7 +299,7 @@ class Game:
                         self.emit(t, n, kind, speed, .063, dt)
                 if self.mg[t] > 0:
                     self.mg[t] -= dt
-                    self.mg_emit_acc[t] += 9 * 60 * dt / self.k
+                    self.mg_emit_acc[t] += 12 * 60 * dt / self.k
                     mg_n = int(self.mg_emit_acc[t]); self.mg_emit_acc[t] -= mg_n
                     if mg_n:
                         self.emit(t, mg_n, 7, 7.5, .014, dt)    # machine gun: dense, fast, tight (kind 7, normal paint rules)
@@ -353,10 +374,11 @@ class Game:
         for p in self.balls:
             rr = p.rr
             p.x += p.vx * 60 * dt; p.y += p.vy * 60 * dt; p.age += dt
+            p.lock_grace = max(0.0, p.lock_grace - dt)
             gx, gy = int(clamp(p.x / S, 0, GS - 1)), int(clamp(p.y / S, 0, GS - 1))
             ow = self.grid[gy * GS + gx]
             if ow != NEUTRAL and ow != p.team:
-                p.value *= math.exp(-.95 * dt)
+                p.value *= math.exp(-.12 * dt)
             m = rr * .6
             if p.x < m: p.x = m; p.vx = abs(p.vx)
             if p.x > G - m: p.x = G - m; p.vx = -abs(p.vx)
@@ -373,17 +395,17 @@ class Game:
                     if vn < 0:
                         p.vx -= 2 * vn * nx; p.vy -= 2 * vn * ny
                     if p.hit_cd <= 0:
-                        dd = min(p.value, self.hp[b]) * .81
-                        p.value -= dd; self.hit_base(b, dd * self.late_k(b)); p.hit_cd = .6
-                        self.events.append((self.t, 'ballHit', p.team, b, dd))
+                        trade = min(p.value, self.hp[b])
+                        p.value -= trade; self.hit_base(b, trade * self.late_k(b)); p.hit_cd = .6
+                        self.events.append((self.t, 'ballHit', p.team, b, trade))
                         self.burst_sparks(bx + nx * 92 / WS, by + ny * 92 / WS, b, 30, 260, 1.0)
             for b in range(4):
-                if b != p.team and self.lock[b] is p and not self.dead[b]:
-                    p.value -= 5.5e5 * dt
+                if p.lock_grace <= 0 and b != p.team and self.lock[b] is p and not self.dead[b]:
+                    p.value -= 8.0e4 * dt
             p.trail.append((p.x, p.y))
             if len(p.trail) > 260:
                 p.trail.pop(0)
-            if p.value < 5e4 or p.age > 22 * self.k:
+            if p.value < 5e4 or p.age > 30 * self.k:
                 p.alive = False
                 continue
             K.paint_solid(self.grid, self.heat, p.x, p.y, p.team, rr * .95)
@@ -411,7 +433,7 @@ class Game:
             sn['x'] += sn['vx'] * dt; sn['y'] += sn['vy'] * dt
             out = not (0 <= sn['x'] <= G and 0 <= sn['y'] <= G)
             xe, ye = clamp(sn['x'], 0, G), clamp(sn['y'], 0, G)
-            K.paint_line(self.grid, self.heat, x0, y0, xe, ye, sn['team'], S * 2.4)
+            K.paint_line(self.grid, self.heat, x0, y0, xe, ye, sn['team'], S * 3.8)
             for b in range(4):
                 if b != sn['team'] and not self.dead[b] and b not in sn['hit']:
                     bx2, by2 = BASES[b]
@@ -430,6 +452,8 @@ class Game:
                 sn['done'] = True; sn['x'], sn['y'] = xe, ye
                 self.burst_sparks(xe, ye, sn['team'], 30, 260, .9)
         self.snipers = [sn for sn in self.snipers if sn['fade'] < .6]
+        self.shotgun_fx = [fx for fx in self.shotgun_fx if self.t - fx['t'] < .9]
+        self.shield_fx = [fx for fx in self.shield_fx if self.t - fx['t'] < 2.8]
         for L in self.lasers:
             L['life'] -= dt
         self.lasers = [L for L in self.lasers if L['life'] > 0]

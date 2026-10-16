@@ -154,8 +154,10 @@ def check_big_ball_scaling(seed):
         g = Game(seed=seed, match=300)
         assert g.fire_item(1, 3, strength=value)
         p = g.balls[-1]
-        assert p.value == value and p.v0 == value, f"landed value {value} did not set big-ball strength"
-        assert abs((p.vx ** 2 + p.vy ** 2) ** .5 - 1.8) < 1e-12, "big-ball speed changed"
+        expected = max(3e6, 2.0 * value)
+        assert p.value == expected and p.v0 == expected, f"landed value {value} did not scale to big-ball strength"
+        assert abs((p.vx ** 2 + p.vy ** 2) ** .5 - 1.2) < 1e-12, "big-ball speed changed"
+        assert p.lock_grace == 5.0, "big-ball turret grace period changed"
     g = Game(seed=seed, match=300)
     assert g.fire_item(1, 1)
     assert abs(g.mg[1] - MG_DURATION * g.k) < 1e-12, "machine-gun duration was not scaled"
@@ -163,7 +165,7 @@ def check_big_ball_scaling(seed):
     g.opened = True
     g.mg[0] = MG_DURATION * g.k
     g.tick(DT)
-    expected_fraction = (9 * 60 * DT / g.k) % 1
+    expected_fraction = (12 * 60 * DT / g.k) % 1
     assert abs(g.mg_emit_acc[0] - expected_fraction) < 1e-9, "machine-gun firing cadence was not scaled"
     g = Game(seed=seed, match=300)
     assert abs(g.board.emit_clock - .5 * g.k) < 1e-12, "initial emitter timer was not scaled"
@@ -172,7 +174,7 @@ def check_big_ball_scaling(seed):
     assert g.power_clock == 0, "power drift timer was not scaled"
     g = Game(seed=seed, match=300)
     g.fire_item(0, 3, strength=1e6)
-    g.balls[0].age = 22 * g.k - DT / 2
+    g.balls[0].age = 30 * g.k - DT / 2
     g.tick(DT)
     assert not g.balls, "big-ball lifetime was not scaled"
     g = Game(seed=seed, match=300)

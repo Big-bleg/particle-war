@@ -298,10 +298,18 @@ class Renderer:
             mg = g.bkind[:n] == 7                       # machine-gun rounds: longer, thicker, white-hot
             if mg.any():
                 arr[mg, 0] = x[mg] - vx[mg] * 4.5; arr[mg, 1] = y[mg] - vy[mg] * 4.5
-                arr[mg, 4] = 2.0
-                arr[mg, 8:11] = arr[mg, 8:11] * .45 + .55; arr[mg, 11] = 1.0
+                arr[mg, 4] = 2.4
+                arr[mg, 8:11] = (1.0, .91, .36); arr[mg, 11] = 1.0
+            shotgun = g.bkind[:n] == 8
+            if shotgun.any():
+                arr[shotgun, 0] = x[shotgun] - vx[shotgun] * 2.4
+                arr[shotgun, 1] = y[shotgun] - vy[shotgun] * 2.4
+                arr[shotgun, 4] = 2.0
+                arr[shotgun, 8:11] = (1.0, .94, .72); arr[shotgun, 11] = 1.0
             ADD.add_array(arr)
             g2 = arr.copy(); g2[:, 4] = 3.0; g2[:, 11] = .25
+            g2[mg, 4] = 5.0; g2[mg, 11] = .48
+            g2[shotgun, 4] = 4.0; g2[shotgun, 11] = .4
             GL.add_array(g2)
         # big balls (no laser lines)
         for p in g.balls:
@@ -342,21 +350,38 @@ class Renderer:
             r = (1 - a) * 260
             HADD.circle(G / 2 + ox, G / 2 + oy, r, (1, 1, 1, a * .7), kind=1, p=3)
             GL.circle(G / 2 + ox, G / 2 + oy, 60 + r * .3, (1, 1, 1, a), kind=2)
+        for fx in g.shotgun_fx:
+            age = g.t - fx['t']
+            fade = max(0.0, 1.0 - age / .9)
+            bx, by = BASES[fx['team']]
+            mid = fx['angle']
+            reach = 250 + age * 120
+            for k in range(11):
+                a = mid + math.radians(-12.5 + 2.5 * k)
+                ex, ey = bx + math.cos(a) * reach, by + math.sin(a) * reach
+                ADD.add(bx + ox, by + oy, ex + ox, ey + oy, 2.6 * fade, 0,
+                        (1.0, .93, .65, .82 * fade))
+            HADD.circle(bx + ox, by + oy, 30 + age * 24,
+                        (1.0, .85, .42, .72 * fade), kind=1, p=4.0)
+            GL.circle(bx + ox, by + oy, 56 + age * 36,
+                      (1.0, .78, .3, .7 * fade), kind=2)
+            T.append(('散弹', 17, bx + ox, by + oy - 74, (1, 1, 1, fade), (1.0, .86, .35, fade), 'c'))
         for sn in g.snipers:                  # sniper round: big bright head + long tapered trail + fading painted streak
             hi = THI[sn['team']]; f = 1 - sn['fade'] / .6
+            sniper_hi = (.48, .9, 1.0)
             hx, hy = sn['x'] + ox, sn['y'] + oy
             L = math.hypot(sn['x'] - sn['x0'], sn['y'] - sn['y0']) or 1
             ux, uy = (sn['x'] - sn['x0']) / L, (sn['y'] - sn['y0']) / L
             ADD.add(sn['x0'] + ox, sn['y0'] + oy, hx, hy, 5 * f, 0, (hi[0], hi[1], hi[2], .55 * f))
-            ADD.add(sn['x0'] + ox, sn['y0'] + oy, hx, hy, 1.6 * f, 0, (1, 1, 1, .8 * f))
+            ADD.add(sn['x0'] + ox, sn['y0'] + oy, hx, hy, 2.2 * f, 0, (1, .96, .82, .98 * f))
             GL.add(sn['x0'] + ox, sn['y0'] + oy, hx, hy, 14 * f, 0, (hi[0], hi[1], hi[2], .7 * f))
             if not sn['done']:
                 tl = min(L, 260)
                 ADD.add(hx - ux * tl, hy - uy * tl, hx, hy, 11, 4, (hi[0], hi[1], hi[2], 1))
                 ADD.add(hx - ux * tl * .6, hy - uy * tl * .6, hx, hy, 5, 4, (1, 1, 1, 1))
                 ADD.circle(hx, hy, 9, (1, 1, 1, 1))
-                ADD.circle(hx, hy, 26, (hi[0], hi[1], hi[2], .9), kind=2)
-                GL.circle(hx, hy, 50, (hi[0], hi[1], hi[2], 1), kind=2)
+                ADD.circle(hx, hy, 26, (sniper_hi[0], sniper_hi[1], sniper_hi[2], .95), kind=2)
+                GL.circle(hx, hy, 54, (sniper_hi[0], sniper_hi[1], sniper_hi[2], 1), kind=2)
         for L in g.lasers:
             f = L['life'] / L['max']; hi = THI[L['team']]
             ADD.add(L['x0'] + ox, L['y0'] + oy, L['x1'] + ox, L['y1'] + oy, L['w'] * f, 0, (hi[0], hi[1], hi[2], .8 * f))
@@ -395,11 +420,11 @@ class Renderer:
                 for k in (-1, 0, 1):
                     aa = a + k * .35
                     HADD.add(mx, my, mx + math.cos(aa) * (18 + 10 * fl), my + math.sin(aa) * (18 + 10 * fl), 2.2, 4, (1, 1, .85, .9))
-                HADD.circle(x, y, BASE_R + 12, (hi[0], hi[1], hi[2], .8), kind=1, p=2.5)
-                GL.circle(mx, my, 40, (1, 1, .9, .9), kind=2)
-                T.append(('机枪', 18, x, y - BASE_R - 16, (1, 1, 1, 1), (hi[0], hi[1], hi[2], 1), 'c'))
+                HADD.circle(x, y, BASE_R + 12, (1.0, .82, .3, .95), kind=1, p=3.5)
+                GL.circle(mx, my, 46, (1, .86, .4, 1), kind=2)
+                T.append(('机枪', 19, x, y - BASE_R - 16, (1, 1, .82, 1), (1, .68, .15, 1), 'c'))
             if any(sn['team'] == t and not sn['done'] for sn in g.snipers) or any(sn['team'] == t and sn['fade'] < .3 for sn in g.snipers):
-                T.append(('狙击', 18, x, y - BASE_R - 16, (1, 1, 1, 1), (hi[0], hi[1], hi[2], 1), 'c'))
+                T.append(('狙击', 19, x, y - BASE_R - 16, (1, 1, 1, 1), (.3, .86, 1, 1), 'c'))
             if g.lock[t] is not None and g.lock[t].alive:
                 HA.circle(x, y, 13, (1, .3, .3, .9), kind=1, p=1.5)
             # shield (top) and ammo pool (bottom)
@@ -411,6 +436,17 @@ class Renderer:
             HA.box(x - 50, y + 16, x + 50, y + 38, (.02, .04, .06, .75), r=5)
             T.append(((fmt(g.ammo[t]) if g.ammo[t] >= 1e6 else fmt_score(g.ammo[t])), 15, x + 6, y + 27, (1, 1, 1, 1), (0, 0, 0, 0), 'c'))
             HA.box(x - 44, y + 25, x - 30, y + 29, (.9, .9, .9, .9), r=1)
+        for fx in g.shield_fx:
+            age = g.t - fx['t']
+            fade = max(0.0, 1.0 - age / 2.8)
+            bx, by = BASES[fx['team']]
+            x, y = bx + ox, by + oy
+            radius = BASE_R + 16 + age * 44
+            HADD.circle(x, y, radius, (.28, .86, 1.0, .9 * fade), kind=1, p=4.0)
+            HADD.circle(x, y, radius + 9, (.62, .96, 1.0, .62 * fade), kind=1, p=2.0)
+            GL.circle(x, y, radius + 20, (.24, .7, 1.0, .68 * fade), kind=2)
+            T.append((f"护盾 +{fmt(fx['amount'])}", 18, x, y - BASE_R - 38,
+                      (1, 1, 1, fade), (.25, .86, 1.0, fade), 'c'))
         # floaters
         for f in g.floaters:
             a = min(1.0, f['life'] / .4); rise = (f['max'] - f['life']) * 22

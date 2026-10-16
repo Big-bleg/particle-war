@@ -61,17 +61,18 @@ Headless export needs an OpenGL 3.3 context. It uses moderngl's standalone conte
 
 - **Opening:** at 0.5 s each base fires a sniper toward the centre, painting a thick line. The rounds meet at about 2 s and burst into a radial paint spray. Turrets start after that.
 - **Paint rule (strict, UnityDots-style):** each bullet sweeps every grid cell touched by its full tick path, including diagonal corner touches. It passes through its own colour, then converts only the first foreign or neutral cell and dies. Opposing bullets whose swept paths touch the same cell cancel symmetrically before paint is applied, independent of processing order. Bullets bounce off arena walls (2 bounces, 15% speed loss per bounce).
-- **Turrets:** sweep continuously and snap-lock (9 rad/s) onto enemy big balls within half the map. Locked streams grind the ball (−550K/s per base).
+- **Turrets:** sweep continuously and snap-lock (9 rad/s) onto enemy big balls within half the map. Each locked base grinds a big ball for 80K/s after its 5 s arrival grace period.
 - **Big balls:** brushes that paint while moving.
-  - They lose value over enemy paint (×e^−0.95 per second) and keep flying after their base dies.
-  - Against a shield the trade is roughly 1:1: both lose 0.81 × min(ball, shield), and the ball bounces off.
+  - A landed marble produces a ball with at least 3M strength and otherwise twice the marble value. It travels at 72 px/s, slower than bullets, and has a 5 s turret grace period.
+  - Enemy paint erodes value at 0.12/s. A shield contact trades the same amount from ball strength and shield HP, then the ball bounces. The ball remains in play for up to 30 reference seconds.
 - **Items:**
-  - 散弹: 90 normal bullets in a symmetric 25° cone (±12.5° around the barrel), same rules as the stream.
-  - 机枪: 3 s straight stream.
-  - 护盾: +HP with a floating "+20K"-style number.
-  - 大球: a slow big ball whose initial strength equals the landed marble's value; shield contact trades about 1:1.
-  - 狙击: a fast moving piercing round (1500 px/s) that paints a solid line as it travels to the edge.
+  - 散弹: 240 normal-paint bullets in a symmetric 25° cone (±12.5° around the barrel), with a short golden fan flash and bright pellet tracers.
+  - 机枪: a 5 reference-second stream (scaled with `--match`) at 12 rounds per 1/60 reference second, rendered with long gold-white tracers and a muzzle ring.
+  - 护盾: +max(250K, 3% of current HP), capped at 16M, with a precise HUD update, floating amount, and a 2.8 s expanding cyan ring.
+  - 大球: see the strength, speed, grace, erosion, and shield-trade rules above.
+  - 狙击: a 1500 px/s piercing round aimed at an enemy base, with a bright cyan head and white core streak as it paints to the edge.
 - **Item triggers:** each physical bottom slot maps directly to its displayed label: 散弹/机枪/护盾/大球/狙击. A landing fires that slot's effect immediately for that marble's team and consumes the marble; it does not add then spend an inventory charge. This is an intentional departure from the independent LOOP item ticker described in the Douyin ep6 notes. Keyboard keys 1–5 are direct casts for the selected player team.
+- **Cast aiming:** offensive casts (散弹/机枪/大球/狙击) snap the team's barrel toward its nearest living enemy base before firing, then hold that heading briefly; the machine gun holds it for its full stream. This is a deliberate choice so a marble rewarded by an item slot produces an immediate battlefield effect instead of inheriting the turret's random sweep direction.
 - **Base display:** top number is the shield (starts at 8.0M); bottom is the ammo pool (starts at 249,968). Ammo at 0 only idles the turret.
 - **Elimination and result:** a base is alive exactly while its shield is above 0. The last living base wins. If all shields reach 0 in the same tick, the match is a draw. At the time limit, remaining bases are ranked by territory share, then remaining shield, then fixed team order (red, green, blue, orange).
 - **Pacing:**
@@ -99,6 +100,7 @@ Headless export needs an OpenGL 3.3 context. It uses moderngl's standalone conte
    - Text uses pixel-aligned glyphs.
    - Bloom is only a subtle additive half-resolution layer; the frame itself is never blurred.
 5. **Item marble bouncing back out:** item slots are sensors. Entering one triggers the item and removes the marble immediately.
+6. **Item casts that looked inactive:** offensive casts now aim at a living enemy; shotgun pellets and machine-gun rounds have distinct high-contrast tracers; shields add a visible fraction of HP; and big balls have enough strength and protection to reach a shield. These are deliberate cast behavior and balance changes. The bullet kernel still applies the same strict first-foreign-cell rule and symmetric cancellation to every shotgun and machine-gun bullet.
 
 ## Tools
 
