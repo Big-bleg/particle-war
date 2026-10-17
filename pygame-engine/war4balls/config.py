@@ -43,6 +43,8 @@ ITEM_MIX = [5, 17, 11, 14, 6]   # ref2 observed counts at 6:25; informational, n
 GATE_VALUE = 262144             # 2^18: marbles >= this pass the buffer strip
 MG_DURATION = 5.0                # deliberate longer cast window; Game scales this by its match preset
 SNIPER_SPEED = 1500.0            # px/s; sniper is a moving projectile, not an instant beam
+ITEM_CAST_AIM_DELAY_ENABLED = False  # opt-in: wait for a useful barrel heading after an offensive cast
+ITEM_CAST_AIM_DELAY_MAX = 1.5    # simulation seconds; immediate firing remains the default
 
 def marble_radius(v):
     return .85 * (25 if v >= 1e6 else 20 if v >= 1e5 else 18 if v >= 5e4 else 16.5 if v >= 2e4 else 15 if v >= 1e4 else 13 if v >= 1e3 else 10 if v >= 100 else 8.5)

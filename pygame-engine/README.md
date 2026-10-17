@@ -70,9 +70,10 @@ Headless export needs an OpenGL 3.3 context. It uses moderngl's standalone conte
   - 机枪: a 5 reference-second stream (scaled with `--match`) at 12 rounds per 1/60 reference second, rendered with long gold-white tracers and a muzzle ring.
   - 护盾: +max(250K, 3% of current HP), capped at 16M, with a precise HUD update, floating amount, and a 2.8 s expanding cyan ring.
   - 大球: see the strength, speed, grace, erosion, and shield-trade rules above.
-  - 狙击: a 1500 px/s piercing round aimed at an enemy base, with a bright cyan head and white core streak as it paints to the edge.
+  - 狙击: a 1500 px/s piercing round fired along the barrel angle at cast time, with a bright cyan head and white core streak as it paints to the edge.
 - **Item triggers:** each physical bottom slot maps directly to its displayed label: 散弹/机枪/护盾/大球/狙击. A landing fires that slot's effect immediately for that marble's team and consumes the marble; it does not add then spend an inventory charge. This is an intentional departure from the independent LOOP item ticker described in the Douyin ep6 notes. Keyboard keys 1–5 are direct casts for the selected player team.
-- **Cast aiming:** offensive casts (散弹/机枪/大球/狙击) snap the team's barrel toward its nearest living enemy base before firing, then hold that heading briefly; the machine gun holds it for its full stream. This is a deliberate choice so a marble rewarded by an item slot produces an immediate battlefield effect instead of inheriting the turret's random sweep direction.
+- **Cast aiming:** every item uses the team's live `sim.aim[team]` barrel direction. Shotgun pellets form a 25° cone centered on the barrel at the instant of firing; sniper rounds and big balls use that same fire-time angle. There is no nearest-enemy auto-aim. Machine-gun fire follows the live barrel throughout its burst, so the turret keeps sweeping while it emits rounds.
+- **Optional aim delay:** `war4balls/config.py` has `ITEM_CAST_AIM_DELAY_ENABLED = False` by default. Turning it on makes offensive casts wait up to `ITEM_CAST_AIM_DELAY_MAX = 1.5` simulation seconds for the barrel ray to reach neutral or enemy territory before firing; if no useful heading appears, it fires when the timer expires. Shield casts remain immediate. The default preserves immediate slot-land firing.
 - **Base display:** top number is the shield (starts at 8.0M); bottom is the ammo pool (starts at 249,968). Ammo at 0 only idles the turret.
 - **Elimination and result:** a base is alive exactly while its shield is above 0. The last living base wins. If all shields reach 0 in the same tick, the match is a draw. At the time limit, remaining bases are ranked by territory share, then remaining shield, then fixed team order (red, green, blue, orange).
 - **Pacing:**
@@ -100,7 +101,7 @@ Headless export needs an OpenGL 3.3 context. It uses moderngl's standalone conte
    - Text uses pixel-aligned glyphs.
    - Bloom is only a subtle additive half-resolution layer; the frame itself is never blurred.
 5. **Item marble bouncing back out:** item slots are sensors. Entering one triggers the item and removes the marble immediately.
-6. **Item casts that looked inactive:** offensive casts now aim at a living enemy; shotgun pellets and machine-gun rounds have distinct high-contrast tracers; shields add a visible fraction of HP; and big balls have enough strength and protection to reach a shield. These are deliberate cast behavior and balance changes. The bullet kernel still applies the same strict first-foreign-cell rule and symmetric cancellation to every shotgun and machine-gun bullet.
+6. **Item casts that looked inactive:** shotgun pellets and machine-gun rounds have distinct high-contrast tracers; shields add a visible fraction of HP; big balls have enough strength and protection to reach a shield; and sniper rounds have a brighter cyan head and core streak. Cast directions follow the barrel sweep, so an individual offensive cast can point into friendly territory or a wall. The optional aim delay is off by default. The bullet kernel still applies the same strict first-foreign-cell rule and symmetric cancellation to every shotgun and machine-gun bullet.
 
 ## Tools
 

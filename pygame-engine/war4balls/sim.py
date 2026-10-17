@@ -1,11 +1,12 @@
 """Game rules (ported from web-game/js/game.js) - deterministic given a seed."""
 import math
 import numpy as np
-from .config import (G, GS, S, WS, NEUTRAL, BASES, BASE_R, MATCH, MG_DURATION, SNIPER_SPEED, TAU, fmt, clamp)
+from .config import (G, GS, S, WS, NEUTRAL, BASES, BASE_R, MATCH, MG_DURATION, SNIPER_SPEED,
+                     ITEM_CAST_AIM_DELAY_ENABLED, ITEM_CAST_AIM_DELAY_MAX, TAU, fmt, clamp)
 from . import kernels as K
 from .board import Board
 
-MAXB = 9000
+MAXB = 12000
 PATH_CELLS = 64
 
 
@@ -43,6 +44,8 @@ class Game:
         self.spin = [float((-1 if self.rng.random() < .5 else 1) * self.rng.uniform(.45, .7)) for _ in range(4)]
         self.aim = [math.atan2(G / 2 - by, G / 2 - bx) for bx, by in BASES]
         self.aim_hold = [0.0] * 4
+        self.item_cast_aim_delay_enabled = ITEM_CAST_AIM_DELAY_ENABLED
+        self.pending_item_casts = []
         self.lock = [None] * 4
         self.cool = [0.0] * 4
         self.emit_acc = [0.0] * 4
@@ -155,24 +158,41 @@ class Game:
             self.bteam[i] = team; self.bkind[i] = kind; self.bbounce[i] = 0
             self.n += 1
 
-    def _item_aim(self, team):
-        """Aim an offensive cast at the nearest living enemy base."""
+    def _item_direction_is_useful(self, team, angle):
+        """Whether a barrel ray reaches neutral or enemy territory before the arena wall."""
         bx, by = BASES[team]
-        enemies = [q for q in range(4) if q != team and not self.dead[q]]
-        if not enemies:
-            enemies = [q for q in range(4) if q != team]
-        target = min(enemies, key=lambda q: math.hypot(BASES[q][0] - bx, BASES[q][1] - by))
-        ex, ey = BASES[target]
-        return math.atan2(ey - by, ex - bx)
+        dx, dy = math.cos(angle), math.sin(angle)
+        edge = min((G - 20 - bx) / dx if dx > 0 else (20 - bx) / dx if dx < 0 else math.inf,
+                   (G - 20 - by) / dy if dy > 0 else (20 - by) / dy if dy < 0 else math.inf)
+        reach = min(500.0, edge)
+        if reach < 150.0:
+            return False
+        for distance in range(100, int(reach) + 1, 20):
+            x, y = bx + dx * distance, by + dy * distance
+            gx = int(clamp(x / S, 0, GS - 1)); gy = int(clamp(y / S, 0, GS - 1))
+            if self.grid[gy * GS + gx] != team:
+                return True
+        return False
+
+    def _resolve_pending_item_casts(self, dt):
+        pending = []
+        for cast in self.pending_item_casts:
+            useful = self._item_direction_is_useful(cast["team"], self.aim[cast["team"]])
+            expired = self.t >= cast["deadline"] - 1e-9
+            if useful or expired:
+                self._fire_item(cast["team"], cast["item"], cast["strength"])
+                self.events.append((self.t, "item_delay_fired", cast["team"], cast["item"],
+                                    self.t - cast["queued_at"], useful))
+            else:
+                pending.append(cast)
+        self.pending_item_casts = pending
 
     def _fire_item(self, team, i, strength=None):
         """Apply an item without touching the team's stored inventory."""
         if self.dead[team] or not 0 <= i < 5:
             return False
-        if i in (0, 1, 3, 4):
-            self.aim[team] = self._item_aim(team)
-            hold = MG_DURATION * self.k if i == 1 else .8
-            self.aim_hold[team] = max(self.aim_hold[team], hold)
+        # Snapshot the live barrel once. Shotgun, sniper, and big ball keep this
+        # fire-time heading; MG rounds below read the live barrel on every emission.
         a = self.aim[team]; bx, by = BASES[team]
         if i == 0:                                   # 散弹: dense normal bullets in a barrel-centred 25° cone
             n_before = self.n
@@ -192,7 +212,7 @@ class Game:
                 self.n += 1
             self.shotgun_fx.append(dict(team=team, t=self.t, angle=a))
             self.events.append((self.t, 'shotgun', team, self.n - n_before))
-        elif i == 1:                                 # 机枪: rapid straight stream (3 reference seconds)
+        elif i == 1:                                 # 机枪: rapid stream following the live barrel as it sweeps
             self.mg[team] = MG_DURATION * self.k
             self.events.append((self.t, 'machinegun', team))
         elif i == 2:                                 # 护盾: capped HP gain
@@ -222,6 +242,12 @@ class Game:
 
     def fire_item(self, team, i, strength=None):
         """Fire an item directly; used by item-slot landings so no inventory is added or spent."""
+        if (self.item_cast_aim_delay_enabled and i in (0, 1, 3, 4)
+                and not self.dead[team] and 0 <= i < 5):
+            self.pending_item_casts.append(dict(team=team, item=i, strength=strength,
+                                                queued_at=self.t,
+                                                deadline=self.t + ITEM_CAST_AIM_DELAY_MAX))
+            return True
         return self._fire_item(team, i, strength)
 
     def manual_item(self, team, i):
@@ -229,6 +255,10 @@ class Game:
         if i == 3 and (self.tp < 45 or len(self.balls) >= (2 if self.tp > 420 else 1)):
             return False
         return self.fire_item(team, i)
+
+    def _fire_late_extra_bigball(self, team):
+        """Late flood pacing uses the same live-barrel direction as every other big ball."""
+        return self.fire_item(team, 3, strength=2 ** 17)
 
     def use(self, team, i, force=False):
         bag = self.items[team]
@@ -241,7 +271,7 @@ class Game:
                 return False
             if len(self.balls) >= (2 if self.tp > 420 else 1):
                 return False
-        if not self._fire_item(team, i):
+        if not self.fire_item(team, i):
             return False
         bag[i] -= 1
         return True
@@ -280,6 +310,7 @@ class Game:
             else:
                 self.aim[t] += self.spin[t] * dt
             self.aim[t] = (self.aim[t] + math.pi) % TAU - math.pi
+        self._resolve_pending_item_casts(dt)
         # firing: continuous stream (constant bullets/s), cadence clock only drives AI item decisions
         if self.opened:
             age = self.tp / MATCH
@@ -364,7 +395,7 @@ class Game:
                 self.waves.append(dict(team=lead, r=90.0, a=math.atan2(G / 2 - by, G / 2 - bx) + self.U(-.25, .25), half=.9, sp=170.0, life=0.0))
             if rng.random() < dt * .08 / self.k and len(self.balls) < 2:
                 t = al[int(rng.integers(0, len(al)))]
-                self.fire_item(t, 3, strength=2 ** 17)
+                self._fire_late_extra_bigball(t)
         for w in self.waves:
             w['r'] += w['sp'] * dt; w['life'] += dt
             bx, by = BASES[w['team']]
